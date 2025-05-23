@@ -217,8 +217,8 @@ class GFS:
         #cycle = date.hour
         
         prate = []
-        dlwrf = []
-        dswrf = []
+        sdlwrf = []
+        sdswrf = []
         stmp = []
         spfh = []
         uwind = []
@@ -230,7 +230,7 @@ class GFS:
             'u10': ['165', uwind], 'v10': ['166', vwind]},
             'group2': {'prmsl': ['meanSea', prmsl]},
             'group3': {'prate': ['surface', prate]},
-            'group4': {'dlwrf': ['surface', dlwrf], 'dswrf': ['surface', dswrf]}
+            'group4': {'sdlwrf': ['surface', sdlwrf], 'sdswrf': ['surface', sdswrf]}
         }
 
         #Get lon/lat
@@ -386,8 +386,8 @@ class GFS:
 
         if rad:
             ds = xr.Dataset({
-                'dlwrf': (['time', 'ny_grid', 'nx_grid'], np.array(dlwrf)),
-                'dswrf': (['time', 'ny_grid', 'nx_grid'], np.array(dswrf)),
+                'sdlwrf': (['time', 'ny_grid', 'nx_grid'], np.array(sdlwrf)),
+                'sdswrf': (['time', 'ny_grid', 'nx_grid'], np.array(sdswrf)),
             },
                 coords={
                     'time': np.round((times - date.to_datetime64()) / np.timedelta64(1, 'D'), 5).astype('float32'),
@@ -414,12 +414,12 @@ class GFS:
                 'standard_name': 'longitude',
             }
 
-            ds.dlwrf.attrs = {
+            ds.sdlwrf.attrs = {
                 'units': 'W m-2',
                 'long_name': 'Downward short-wave radiation flux'
             }
 
-            ds.dswrf.attrs = {
+            ds.sdswrf.attrs = {
                 'units': 'W m-2',
                 'long_name': 'Downward long-wave radiation flux'
             }
