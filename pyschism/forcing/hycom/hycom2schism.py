@@ -272,6 +272,11 @@ class OpenBoundaryInventory:
         opbd = []
         #for boundary in gdf.itertuples():
         #    opbd.extend(list(boundary.indexes))
+        logger.info(f'ocean_bnd_ids: {ocean_bnd_ids}')
+        if len(ocean_bnd_ids) > gdf.shape[0]:
+            raise ValueError(
+                f'ocean_bnd_ids: {ocean_bnd_ids} is out of range of the number of open boundaries: {gdf.shape[0]}'
+            )
         for ibnd in ocean_bnd_ids:
             opbd.extend(list(gdf.iloc[ibnd].indexes))
         blon = self.hgrid.coords[opbd, 0]
