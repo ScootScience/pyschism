@@ -67,6 +67,12 @@ if __name__ == "__main__":
                         type=str,
                         help='Tidal datbase: tpxo or fes2014')
 
+    parser.add_argument(
+        "outdir",
+        type=str,
+        default="./",
+        help="Output directory for generated files (default: './')")
+
     #Parse the command-line arguments
     args = parser.parse_args()
     hgrid_filename = args.hgrid
@@ -75,6 +81,7 @@ if __name__ == "__main__":
     bctypes = args.bctypes
     constituents = args.constituents
     database = args.database
+    outdir = args.outdir
 
     # Parse the JSON string into a Python data structure
     try:
@@ -160,7 +167,6 @@ if __name__ == "__main__":
             sthconst.append(np.nan)
             sobc.append(np.nan)
 
-    outdir = './'
     hgrid = Hgrid.open(hgrid_filename, crs="epsg:4326")
 
     bctides = Bctides(
