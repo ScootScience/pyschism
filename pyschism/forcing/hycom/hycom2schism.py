@@ -60,7 +60,9 @@ def convert_longitude(ds, bbox):
 
 
 def get_database(date, Bbox=None):
-    if date >= datetime(2018, 12, 4):
+    if date >= datetime(2025, 1, 1):
+        database = f'ESPC-D-V02_all'
+    elif date >= datetime(2018, 12, 4) and date < datetime(2025, 1, 1):
         database = f'GLBy0.08/expt_93.0'
     elif date >= datetime(2018, 1, 1) and date < datetime(2018, 12, 4):
         database = f'GLBv0.08/expt_93.0'
@@ -87,8 +89,10 @@ def get_idxs(date, database, bbox, lonc=None, latc=None):
         date2 = datetime.utcnow() - timedelta(days=1)
         baseurl = f'https://tds.hycom.org/thredds/dodsC/{database}/FMRC/runs/GLBy0.08_930_FMRC_RUN_{date2.strftime("%Y-%m-%dT12:00:00Z")}?depth[0:1:-1],lat[0:1:-1],lon[0:1:-1],time[0:1:-1]'
     else:
-        baseurl = f'https://tds.hycom.org/thredds/dodsC/{database}?lat[0:1:-1],lon[0:1:-1],time[0:1:-1],depth[0:1:-1]'
-
+        baseurl = f'https://tds.hycom.org/thredds/dodsC/FMRC_{database}/runs/FMRS_{database}_RUN_{date.strftime("%Y-%m-%dT12:00:00Z")}?depth[0:1:-1],lat[0:1:-1],lon[0:1:-1],time[0:1:-1]' if database.startswith(
+            'ESPC-D'
+        ) else f'https://tds.hycom.org/thredds/dodsC/{database}?lat[0:1:-1],lon[0:1:-1],time[0:1:-1],depth[0:1:-1]'
+        # baseurl = f'https://tds.hycom.org/thredds/dodsC/{database}/runs/FMRC_ESPC-D-V02_all_RUN_{date.strftime("%Y-%m-%dT12:00:00Z")}?depth[0:1:-1],lat[0:1:-1],lon[0:1:-1],time[0:1:-1]'
     ds = Dataset(baseurl)
     time1 = ds['time']
     times = nc.num2date(time1,
@@ -242,10 +246,9 @@ def ConvertTemp(salt, temp, dep):
 
 class OpenBoundaryInventory:
 
-    def __init__(self, hgrid, vgrid=None, realtime: bool = False):
+    def __init__(self, hgrid, vgrid=None):
         self.hgrid = hgrid
         self.vgrid = Vgrid.default() if vgrid is None else vgrid
-        self.realtime = realtime
 
     def fetch_data(self,
                    outdir: Union[str, os.PathLike],
@@ -467,8 +470,10 @@ class OpenBoundaryInventory:
 
                 if date >= datetime.utcnow():
                     date2 = datetime.utcnow() - timedelta(days=1)
-                    # Real time ESPC runs used if self.realtime is True; should be used when, e.g. database = 'ESPC-D-V02_all'
-                    url_base = f'https://tds.hycom.org/thredds/dodsC/FMRC_{database}/runs/FMRS_{database}_RUN_' if self.realtime else f'https://tds.hycom.org/thredds/dodsC/{database}/FMRC/runs/GLBy0.08_930_FMRC_RUN_'
+                    # Real time ESPC runs used if database.startswith('ESPC-D') is True; should be used when, e.g. database = 'ESPC-D-V02_all'
+                    url_base = f'https://tds.hycom.org/thredds/dodsC/FMRC_{database}/runs/FMRS_{database}_RUN_' if database.startswith(
+                        'ESPC-D'
+                    ) else f'https://tds.hycom.org/thredds/dodsC/{database}/FMRC/runs/GLBy0.08_930_FMRC_RUN_'
                     url = url_base + \
                         f'{date2.strftime("%Y-%m-%dT12:00:00Z")}?depth[0:1:-1],lat[{lat_idx1}:1:{lat_idx2}],' + \
                         f'lon[{lon_idx1}:1:{lon_idx2}],time[{time_idx}],' + \
@@ -479,7 +484,10 @@ class OpenBoundaryInventory:
                         f'water_v[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}]'
 
                 else:
-                    url=f'https://tds.hycom.org/thredds/dodsC/{database}?lat[{lat_idx1}:1:{lat_idx2}],' + \
+                    url = f'https://tds.hycom.org/thredds/dodsC/FMRC_{database}/runs/FMRS_{database}_RUN_{date.strftime("%Y-%m-%dT12:00:00Z")}?' if database.startswith(
+                        'ESPC-D'
+                    ) else f'https://tds.hycom.org/thredds/dodsC/{database}?'
+                    url = url + f'lat[{lat_idx1}:1:{lat_idx2}],' + \
                         f'lon[{lon_idx1}:1:{lon_idx2}],depth[0:1:-1],time[{time_idx}],' + \
                         f'surf_el[{time_idx}][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
                         f'water_temp[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
@@ -553,7 +561,7 @@ class OpenBoundaryInventory:
 
 class Nudge:
 
-    def __init__(self, hgrid=None, ocean_bnd_ids=None, realtime: bool = False):
+    def __init__(self, hgrid=None, ocean_bnd_ids=None):
 
         if hgrid is None:
             raise ValueError('No hgrid information!')
@@ -564,8 +572,6 @@ class Nudge:
             raise ValueError('Please specify indexes for ocean boundaries!')
         else:
             self.ocean_bnd_ids = ocean_bnd_ids
-
-        self.realtime = realtime
 
     def gen_nudge(self,
                   outdir: Union[str, os.PathLike],
@@ -808,8 +814,10 @@ class Nudge:
                     )
                     if date >= datetime.utcnow():
                         date2 = datetime.utcnow() - timedelta(days=1)
-                        # Real time ESPC runs used if self.realtime is True; should be used when, e.g. database = 'ESPC-D-V02_all'
-                        url_base = f'https://tds.hycom.org/thredds/dodsC/FMRC_{database}/runs/FMRS_{database}_RUN_' if self.realtime else f'https://tds.hycom.org/thredds/dodsC/{database}/FMRC/runs/GLBy0.08_930_FMRC_RUN_'
+                        # Real time ESPC runs used if database.startswith('ESPC-D') is True; should be used when, e.g. database = 'ESPC-D-V02_all'
+                        url_base = f'https://tds.hycom.org/thredds/dodsC/FMRC_{database}/runs/FMRS_{database}_RUN_' if database.startswith(
+                            'ESPC-D'
+                        ) else f'https://tds.hycom.org/thredds/dodsC/{database}/FMRC/runs/GLBy0.08_930_FMRC_RUN_'
                         url = url_base + \
                             f'{date2.strftime("%Y-%m-%dT12:00:00Z")}?depth[0:1:-1],lat[{lat_idx1}:1:{lat_idx2}],' + \
                             f'lon[{lon_idx1}:1:{lon_idx2}],time[{time_idx}],' + \
