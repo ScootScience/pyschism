@@ -262,6 +262,18 @@ class OpenBoundaryInventory:
                    adjust2D=False,
                    lats=None,
                    msl_shifts=None):
+        '''
+        Fetch data from HYCOM and save to netcdf files.
+        Args:
+            outdir: output directory
+            start_date: start date
+            rnday: number of days
+            ocean_bnd_ids: open boundary ids
+            elev2D: whether to save 2D elevation data
+        
+        TODO:
+          - Add a local cache for the data to work around finicky HYCOM server.
+        '''
         outdir = pathlib.Path(outdir)
 
         self.start_date = start_date
