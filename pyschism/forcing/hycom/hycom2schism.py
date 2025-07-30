@@ -244,6 +244,46 @@ def ConvertTemp(salt, temp, dep):
     return ptemp
 
 
+class BoundaryDataset(Dataset):
+    _cache = {}
+    _timeout = 15  # seconds
+
+    def __init__(self, url):
+        '''Wraps netcdf4.Dataset to add a cache and retries.
+        '''
+        super().__init__(url)
+
+    def close(self):
+        '''Must clear cache because we cannot set it upon instantiation due to the parent class's __init__ method.'''
+        self._cache.clear()
+        super().close()
+
+    def __getitem__(self, key):
+        if key not in self._cache:
+            logger.info(f'CACHE MISS for {key}')
+            timeout = time() + self._timeout
+            while True:
+                try:
+                    self._cache[key] = super().__getitem__(key)
+                    break
+                except Exception as e:
+                    logger.error(f'Error getting item {key}: {e}')
+                    if time() > timeout:
+                        raise e
+        else:
+            logger.info(f'CACHE HIT for {key}')
+        return self._cache[key]
+
+    def __setitem__(self, key, value):
+        if key in self._cache:
+            logger.info(f'CACHE UPDATE for {key}')
+            self._cache[key] = value
+        else:
+            logger.info(f'CACHE MISS for {key}')
+            self._cache[key] = super().__setitem__(key, value)
+        return self._cache[key]
+
+
 class OpenBoundaryInventory:
 
     def __init__(self, hgrid, vgrid=None):
@@ -480,6 +520,12 @@ class OpenBoundaryInventory:
                 time_idx, lon_idx1, lon_idx2, lat_idx1, lat_idx2, x2, y2, _ = get_idxs(
                     date, database, bbox, lonc=blonc, latc=blatc)
 
+                url_data_subsets = f'surf_el[{time_idx}][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
+                        f'water_temp[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
+                        f'salinity[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
+                        f'water_u[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
+                        f'water_v[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}]'
+
                 if date >= datetime.utcnow():
                     date2 = datetime.utcnow() - timedelta(days=1)
                     # Real time ESPC runs used if database.startswith('ESPC-D') is True; should be used when, e.g. database = 'ESPC-D-V02_all'
@@ -489,11 +535,7 @@ class OpenBoundaryInventory:
                     url = url_base + \
                         f'{date2.strftime("%Y-%m-%dT12:00:00Z")}?depth[0:1:-1],lat[{lat_idx1}:1:{lat_idx2}],' + \
                         f'lon[{lon_idx1}:1:{lon_idx2}],time[{time_idx}],' + \
-                        f'surf_el[{time_idx}][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
-                        f'water_temp[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
-                        f'salinity[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
-                        f'water_u[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
-                        f'water_v[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}]'
+                        url_data_subsets
 
                 else:
                     url = f'https://tds.hycom.org/thredds/dodsC/FMRC_{database}/runs/FMRS_{database}_RUN_{date.strftime("%Y-%m-%dT12:00:00Z")}?' if database.startswith(
@@ -501,21 +543,16 @@ class OpenBoundaryInventory:
                     ) else f'https://tds.hycom.org/thredds/dodsC/{database}?'
                     url = url + f'lat[{lat_idx1}:1:{lat_idx2}],' + \
                         f'lon[{lon_idx1}:1:{lon_idx2}],depth[0:1:-1],time[{time_idx}],' + \
-                        f'surf_el[{time_idx}][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
-                        f'water_temp[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
-                        f'salinity[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
-                        f'water_u[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
-                        f'water_v[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}]'
+                        url_data_subsets
                 #logger.info(url)
 
-                ds = Dataset(url)
+                ds = BoundaryDataset(url)
                 dep = ds['depth'][:]
 
                 logger.info(
                     f'****Interpolation starts for boundary {ibnd}****')
 
                 #ndt[it]=it*24*3600.
-
                 if elev2D:
                     #ssh
                     ssh = np.squeeze(ds['surf_el'][:, :])
