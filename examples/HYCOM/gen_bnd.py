@@ -76,11 +76,14 @@ if __name__ == "__main__":
 
     hgrid = Hgrid.open(args.hgrid, crs='epsg:4326')
     bnd = OpenBoundaryInventory(hgrid, args.vgrid)
-
-    bnd.fetch_data(args.outdir,
-                   args.start_date,
-                   args.rnday,
-                   elev2D=args.elev2d,
-                   TS=args.ts,
-                   UV=args.uv,
-                   ocean_bnd_ids=args.ocean_bnd_ids)
+    try:
+        bnd.fetch_data(args.outdir,
+                       args.start_date,
+                       args.rnday,
+                       elev2D=args.elev2d,
+                       TS=args.ts,
+                       UV=args.uv,
+                       ocean_bnd_ids=args.ocean_bnd_ids)
+    except Exception as e:
+        logger.error(f'Error fetching data: {e}')
+        raise e

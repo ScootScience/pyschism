@@ -1,12 +1,12 @@
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 import pathlib
 import tempfile
 import subprocess
 import shutil
-from typing import Union
+from typing import Union, Optional
 from time import time
 
 import numpy as np
@@ -18,7 +18,7 @@ from netCDF4 import Dataset
 from matplotlib.transforms import Bbox
 import seawater as sw
 import xarray as xr
-
+from functools import lru_cache
 from pyschism.mesh.base import Nodes, Elements
 from pyschism.mesh.vgrid import Vgrid
 
@@ -80,10 +80,15 @@ def get_database(date, Bbox=None):
         database = f'GLBv0.08/expt_53.X/data/{date.year}'
     else:
         raise ValueError(f'No data fro {date}!')
+    logger.info(f'Using HYCOM database: {database}')
     return database
 
 
-def get_idxs(date, database, bbox, lonc=None, latc=None):
+def get_idxs(date: datetime,
+             database: str,
+             bbox: Bbox,
+             lonc: Optional[float] = None,
+             latc: Optional[float] = None):
 
     if date >= datetime.utcnow():
         date2 = datetime.utcnow() - timedelta(days=1)
@@ -244,43 +249,39 @@ def ConvertTemp(salt, temp, dep):
     return ptemp
 
 
-class BoundaryDataset(Dataset):
-    _cache = {}
+@lru_cache(maxsize=100)
+class BoundaryDataset:
+
     _timeout = 15  # seconds
 
     def __init__(self, url):
         '''Wraps netcdf4.Dataset to add a cache and retries.
         '''
-        super().__init__(url)
+        # super().__init__(url)
+        self._cache = {}
+        self.url = url
+        # self._ds = Dataset(url)
+
+    @property
+    def ds(self):
+        if not hasattr(self, '_ds'):
+            self._ds = self.open_ds(self.url)
+        return self._ds
+
+    @staticmethod
+    def open_ds(url: str):
+        return Dataset(url)
 
     def close(self):
-        '''Must clear cache because we cannot set it upon instantiation due to the parent class's __init__ method.'''
-        self._cache.clear()
-        super().close()
+        '''We dont want to clear the cache bc it is associated with this instance and this instance itself is cached.'''
+        pass
 
     def __getitem__(self, key):
         if key not in self._cache:
-            logger.info(f'CACHE MISS for {key}')
-            timeout = time() + self._timeout
-            while True:
-                try:
-                    self._cache[key] = super().__getitem__(key)
-                    break
-                except Exception as e:
-                    logger.error(f'Error getting item {key}: {e}')
-                    if time() > timeout:
-                        raise e
+            logger.debug(f'CACHE MISS for {key}')
+            self._cache[key] = self.ds[key]
         else:
             logger.info(f'CACHE HIT for {key}')
-        return self._cache[key]
-
-    def __setitem__(self, key, value):
-        if key in self._cache:
-            logger.info(f'CACHE UPDATE for {key}')
-            self._cache[key] = value
-        else:
-            logger.info(f'CACHE MISS for {key}')
-            self._cache[key] = super().__setitem__(key, value)
         return self._cache[key]
 
 
@@ -525,9 +526,18 @@ class OpenBoundaryInventory:
                         f'salinity[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
                         f'water_u[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
                         f'water_v[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}]'
-
-                if date >= datetime.utcnow():
-                    date2 = datetime.utcnow() - timedelta(days=1)
+                # vars = ["Sssh", "s3z", "ice", "t3z", "u3z", "v3z", "ssh"]
+                # for var in vars:
+                #     url = f'https://tds.hycom.org/thredds/dodsC/datasets/ESPC-D-V02/data/archive/2025/US058GCOM-OPSnce.espc-d-031-hycom_fcst_glby008_2025072912_t0000_{var}.nc'
+                #     ds = Dataset(url)
+                #     print(ds)
+                #     dss = BoundaryDataset(url)
+                #     breakpoint()
+                # "https://tds.hycom.org/thredds/catalog/datasets/ESPC-D-V02/data/archive/catalog.html"
+                # "https://tds.hycom.org/thredds/dodsC/datasets/ESPC-D-V02/data/archive/2025/US058GCOM-OPSnce.espc-d-031-hycom_fcst_glby008_2025072912_t0000_Sssh.nc"
+                if date >= datetime.now(timezone.utc).replace(tzinfo=None):
+                    date2 = datetime.now(
+                        timezone.utc).replace(tzinfo=None) - timedelta(days=1)
                     # Real time ESPC runs used if database.startswith('ESPC-D') is True; should be used when, e.g. database = 'ESPC-D-V02_all'
                     url_base = f'https://tds.hycom.org/thredds/dodsC/FMRC_{database}/runs/FMRS_{database}_RUN_' if database.startswith(
                         'ESPC-D'
@@ -538,7 +548,7 @@ class OpenBoundaryInventory:
                         url_data_subsets
 
                 else:
-                    url = f'https://tds.hycom.org/thredds/dodsC/FMRC_{database}/runs/FMRS_{database}_RUN_{date.strftime("%Y-%m-%dT12:00:00Z")}?' if database.startswith(
+                    url = f'https://tds.hycom.org/thredds/dodsC/FMRC_{database}/runs/FMRC_{database}_RUN_{date.strftime("%Y-%m-%dT12:00:00Z")}?' if database.startswith(
                         'ESPC-D'
                     ) else f'https://tds.hycom.org/thredds/dodsC/{database}?'
                     url = url + f'lat[{lat_idx1}:1:{lat_idx2}],' + \
@@ -547,64 +557,92 @@ class OpenBoundaryInventory:
                 #logger.info(url)
 
                 ds = BoundaryDataset(url)
+                logger.debug(
+                    f"fetchingurl {url} \nwith a BoundaryDataset instance with id {id(ds)}"
+                )
                 dep = ds['depth'][:]
 
                 logger.info(
                     f'****Interpolation starts for boundary {ibnd}****')
 
                 #ndt[it]=it*24*3600.
-                if elev2D:
-                    #ssh
-                    ssh = np.squeeze(ds['surf_el'][:, :])
+                timeout = 10
+                time_limit = time() + timeout
+                while True:
+                    try:
+                        if elev2D:
+                            #ssh
+                            ssh = np.squeeze(ds['surf_el'][:, :])
 
-                    ssh_int = interp_to_points_2d(y2, x2, bxy, ssh)
-                    dst_elev['time'][it] = it * 24 * 3600.
-                    if adjust2D:
-                        elev_adjust = np.interp(blat, lats, msl_shifts)
-                        dst_elev['time_series'][it, ind1:ind2, 0,
-                                                0] = ssh_int + elev_adjust
-                    else:
-                        dst_elev['time_series'][it, ind1:ind2, 0, 0] = ssh_int
+                            ssh_int = interp_to_points_2d(y2, x2, bxy, ssh)
+                            dst_elev['time'][it] = it * 24 * 3600.
+                            if adjust2D:
+                                elev_adjust = np.interp(blat, lats, msl_shifts)
+                                dst_elev['time_series'][
+                                    it, ind1:ind2, 0,
+                                    0] = ssh_int + elev_adjust
+                            else:
+                                dst_elev['time_series'][it, ind1:ind2, 0,
+                                                        0] = ssh_int
 
-                if TS:
-                    #salt
-                    salt = np.squeeze(ds['salinity'][:, :, :])
+                        if TS:
+                            #salt
+                            salt = np.squeeze(ds['salinity'][:, :, :])
 
-                    salt_int = interp_to_points_3d(dep, y2, x2, bxyz, salt)
-                    salt_int = salt_int.reshape(zcor2.shape)
-                    #timeseries_s[it,:,:,0]=salt_int
-                    dst_salt['time'][it] = it * 24 * 3600.
-                    dst_salt['time_series'][it, ind1:ind2, :, 0] = salt_int
+                            salt_int = interp_to_points_3d(
+                                dep, y2, x2, bxyz, salt)
+                            salt_int = salt_int.reshape(zcor2.shape)
+                            #timeseries_s[it,:,:,0]=salt_int
+                            dst_salt['time'][it] = it * 24 * 3600.
+                            dst_salt['time_series'][it, ind1:ind2, :,
+                                                    0] = salt_int
 
-                    #temp
-                    temp = np.squeeze(ds['water_temp'][:, :, :])
+                            #temp
+                            temp = np.squeeze(ds['water_temp'][:, :, :])
 
-                    #Convert temp to potential temp
-                    ptemp = ConvertTemp(salt, temp, dep)
+                            #Convert temp to potential temp
+                            ptemp = ConvertTemp(salt, temp, dep)
 
-                    temp_int = interp_to_points_3d(dep, y2, x2, bxyz, ptemp)
-                    temp_int = temp_int.reshape(zcor2.shape)
-                    #timeseries_t[it,:,:,0]=temp_int
-                    dst_temp['time'][it] = it * 24 * 3600.
-                    dst_temp['time_series'][it, ind1:ind2, :, 0] = temp_int
+                            temp_int = interp_to_points_3d(
+                                dep, y2, x2, bxyz, ptemp)
+                            temp_int = temp_int.reshape(zcor2.shape)
+                            #timeseries_t[it,:,:,0]=temp_int
+                            dst_temp['time'][it] = it * 24 * 3600.
+                            dst_temp['time_series'][it, ind1:ind2, :,
+                                                    0] = temp_int
 
-                if UV:
-                    uvel = np.squeeze(ds['water_u'][:, :, :])
-                    vvel = np.squeeze(ds['water_v'][:, :, :])
+                        if UV:
+                            uvel = np.squeeze(ds['water_u'][:, :, :])
+                            vvel = np.squeeze(ds['water_v'][:, :, :])
 
-                    dst_uv['time'][it] = it * 24 * 3600.
-                    #uvel
-                    uvel_int = interp_to_points_3d(dep, y2, x2, bxyz, uvel)
-                    uvel_int = uvel_int.reshape(zcor2.shape)
-                    dst_uv['time_series'][it, ind1:ind2, :, 0] = uvel_int
+                            dst_uv['time'][it] = it * 24 * 3600.
+                            #uvel
+                            uvel_int = interp_to_points_3d(
+                                dep, y2, x2, bxyz, uvel)
+                            uvel_int = uvel_int.reshape(zcor2.shape)
+                            dst_uv['time_series'][it, ind1:ind2, :,
+                                                  0] = uvel_int
 
-                    #vvel
-                    vvel_int = interp_to_points_3d(dep, y2, x2, bxyz, vvel)
-                    vvel_int = vvel_int.reshape(zcor2.shape)
-                    dst_uv['time_series'][it, ind1:ind2, :, 1] = vvel_int
-                    #timeseries_uv[it,:,:,1]=vvel_int
+                            #vvel
+                            vvel_int = interp_to_points_3d(
+                                dep, y2, x2, bxyz, vvel)
+                            vvel_int = vvel_int.reshape(zcor2.shape)
+                            dst_uv['time_series'][it, ind1:ind2, :,
+                                                  1] = vvel_int
+                            #timeseries_uv[it,:,:,1]=vvel_int
 
-                ds.close()
+                        ds.close()
+                        break
+                    except Exception as e:
+                        if time() > time_limit:
+                            logger.error(
+                                'Timed out fetching data in OpenBoundaryInventory.fetch_data'
+                            )
+                            logger.error(
+                                f'Error fetching data for boundary {ibnd}: {e}'
+                            )
+                            ds.close()
+                            raise e
         logger.info(f'Writing *th.nc takes {time()-t0} seconds')
 
 
