@@ -32,12 +32,12 @@ def convert_longitude(ds, bbox):
     #TODO: figure out why it takes much longer with the second method
     #lon_attr = ds.coords['lon'].attrs
     if bbox.xmin < 0:
-        logger.info(f'Convert HYCOM longitude from [0, 360) to [-180, 180):')
+        logger.debug(f'Convert HYCOM longitude from [0, 360) to [-180, 180):')
         #ds.coords['lon'] = (ds.coords['lon'] + 180) % 360 - 180
         ds['_lon_adjusted'] = xr.where(ds['lon'] > 180, ds['lon'] - 360,
                                        ds['lon'])
     elif bbox.xmin > 0:
-        logger.info(f'Convert HYCOM longitude from [-180, 180) to [0, 360): ')
+        logger.debug(f'Convert HYCOM longitude from [-180, 180) to [0, 360): ')
         #ds.coords['lon'] = (ds.coords['lon'] + 360) % 360 - 180
         ds['_lon_adjusted'] = xr.where(ds['lon'] < 0, ds['lon'] + 360,
                                        ds['lon'])
@@ -51,7 +51,7 @@ def convert_longitude(ds, bbox):
     ds = ds.rename({'_lon_adjusted': 'lon'})
     #ds = ds.sortby(ds.lon)
     #ds.coords['lon'].attrs = lon_attr
-    logger.info(f'swap dims took {time()-t0} seconds!')
+    logger.debug(f'swap dims took {time()-t0} seconds!')
 
     #make sure it is clipped to the bbox
     ds = ds.sel(lon=slice(bbox.xmin - 0.5, bbox.xmax + 0.5))
@@ -195,7 +195,7 @@ def get_idxs(date: datetime,
     lon_idx2: int
     lat_idx1: int
     '''
-    logger.info(f'Getting idxs for {date}')
+    logger.debug(f'Getting idxs for {date}')
     if not forecast_mode:
         url_date = date
     else:
@@ -209,7 +209,7 @@ def get_idxs(date: datetime,
                          bbox=bbox)
     time1 = ds['time']
     times = decode_nc_times(time1)
-    logger.info(f'times in ds from date {url_date}: {times}')
+    logger.debug(f'times in ds from date {url_date}: {times}')
 
     lon = ds['lon'][:]
     lat = ds['lat'][:]
@@ -217,10 +217,11 @@ def get_idxs(date: datetime,
 
     #check if hycom's lon is the same range as schism's
     same = True
+    # TODO: why isn't this using convert_longitude()??
     if not (bbox.xmin >= lon.min() and bbox.xmax <= lon.max()):
         same = False
         if lon.min() >= 0:
-            logger.info(
+            logger.debug(
                 f'Convert HYCOM longitude from [0, 360) to [-180, 180):')
             idxs = lon >= 180
             #  ds.ds['lon'] = (ds.ds['lon'] + 180) % 360 - 180
@@ -229,7 +230,7 @@ def get_idxs(date: datetime,
             else:
                 lon[idxs] = lon[idxs] - 360
         elif lon.min() <= 0:
-            logger.info(
+            logger.debug(
                 f'Convert HYCOM longitude from [-180, 180) to [0, 360):')
             idxs = lon <= 0
             if archive_data:
@@ -261,18 +262,20 @@ def get_idxs(date: datetime,
     idxs = np.where(date == times)[0]
     #check if time_idx is empty
     if len(idxs) == 0:
+        logger.warning(f'No data found for date {date} given times {times}')
         #If there is missing data, use the data from the next days, the maximum searching days is 3. Otherwise, stop.
         for i in np.arange(0, 3):
             date_before = (date + timedelta(days=int(i) + 1)
                            )  #.astype(datetime)
-            logger.info(f'Try replacing the missing data from {date_before}')
+            logger.warning(
+                f'Try replacing the missing data from {date_before}')
             idxs = np.where(date_before == times)[0]
             if len(idxs) == 0:
                 continue
             else:
                 break
     if len(idxs) == 0:
-        logger.info(f'No date for date {date}')
+        logger.error(f'No date for date {date}')
         sys.exit()
 
     time_idx = idxs.item()
@@ -315,7 +318,7 @@ def interp_to_points_3d(dep, y2, x2, bxyz, val):
     val[idxs] = float('nan')
 
     if not np.all(x2[:-1] <= x2[1:]):
-        logger.info(
+        logger.warning(
             'x2 is not in stricitly ascending order! Sorting x2 and val')
         idxs = np.argsort(x2)
         x2 = x2[idxs]
@@ -333,7 +336,7 @@ def interp_to_points_3d(dep, y2, x2, bxyz, val):
                                                 bxyz[idxs, :], 'nearest')
     idxs = np.isnan(val_int)
     if np.sum(idxs) != 0:
-        logger.info(f'There is still missing value for {val}')
+        logger.error(f'There is still missing value for {val}')
         sys.exit()
     return val_int
 
@@ -343,7 +346,7 @@ def interp_to_points_2d(y2, x2, bxy, val, archive_data: bool = False):
     val[idxs] = float('nan')
 
     if not np.all(x2[:-1] <= x2[1:]):
-        logger.info(
+        logger.warning(
             'x2 is not in stricitly ascending order! Sorting x2 and val')
         idxs = np.argsort(x2)
         x2 = x2[idxs]
@@ -360,7 +363,7 @@ def interp_to_points_2d(y2, x2, bxy, val, archive_data: bool = False):
                                                 bxy[idxs, :], 'nearest')
     idxs = np.isnan(val_int)
     if np.sum(idxs) != 0:
-        logger.info(f'There is still missing value for {val}')
+        logger.error(f'There is still missing value for {val}')
         sys.exit()
     return val_int
 
@@ -477,7 +480,7 @@ class OpenBoundaryInventory:
             self.start_date = self.start_date.replace(hour=12)
             self.timevector = np.arange(
                 self.start_date, self.start_date + timedelta(days=self.rnday),
-                timedelta(hours=12)).astype(datetime)
+                timedelta(hours=1)).astype(datetime)
         else:
             self.timevector = np.arange(
                 self.start_date,
@@ -489,7 +492,7 @@ class OpenBoundaryInventory:
         opbd = []
         #for boundary in gdf.itertuples():
         #    opbd.extend(list(boundary.indexes))
-        logger.info(f'ocean_bnd_ids: {ocean_bnd_ids}')
+        logger.debug(f'ocean_bnd_ids: {ocean_bnd_ids}')
         if len(ocean_bnd_ids) > gdf.shape[0]:
             raise ValueError(
                 f'ocean_bnd_ids: {ocean_bnd_ids} is out of range of the number of open boundaries: {gdf.shape[0]}'
@@ -627,7 +630,9 @@ class OpenBoundaryInventory:
             dst_uv = Dataset(outdir / 'uv3D.th.nc', 'a', format='NETCDF4')
             time_idx_restart = dst_uv['time'][:].shape[0]
 
-        logger.info('**** Accessing GOFS data*****')
+        logger.info(
+            f'**** Accessing GOFS data with forecast_mode={forecast_mode} and archive_data={archive_data}*****'
+        )
         t0 = time()
 
         if restart == False:
@@ -709,13 +714,14 @@ class OpenBoundaryInventory:
                     archive_data=archive_data,
                     date=timevector[0] if forecast_mode else ds_date,
                     bbox=bbox)
-                logger.warning(
+                logger.debug(
                     f"fetching url {url} \nwith a BoundaryDataset instance with id {id(ds)}"
                 )
                 dep = ds['depth'][:]
 
                 logger.info(
-                    f'****Interpolation starts for boundary {ibnd}****')
+                    f'****Interpolation starts for boundary {ibnd} and date {ds_date}****'
+                )
                 #ndt[it]=it*24*3600.
                 time_limit = time() + timeout_seconds
                 while True:
