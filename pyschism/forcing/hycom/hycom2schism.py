@@ -103,35 +103,39 @@ def get_base_url(date: datetime):
 def get_raw_hycom(date: datetime,
                   bbox: Bbox,
                   write_to_file: bool = False,
-                  source: str = 'archive'):
+                  source: str = 'archive',
+                  forecast_length_hours: Optional[int] = None,
+                  forecast_freq_hours: Optional[int] = None) -> xr.Dataset:
     '''
+    Args:
+        date: datetime object which time to lookup in the dataset
+        bbox: Bbox object
+        write_to_file: bool
+        source: str
+        forecast_length_hours: Optional[int]
+        forecast_freq_hours: Optional[int]
+
+    Returns:
+        xarray.Dataset
+
     Works for 'archive' and 'forecast' data sources which are non-aggregated.
 
     This process handles the non-aggregated data avalable fro mthe tds.ycom.org/thredds/dodsC source.
-
-
-    vars = ["Sssh", "s3z", "ice", "t3z", "u3z", "v3z", "ssh"]
-    vars_of_interest = ['s3z', 't3z', 'u3z', 'v3z']
-    for var in vars:
-        url = f'https://tds.hycom.org/thredds/dodsC/datasets/ESPC-D-V02/data/archive/2025/US058GCOM-OPSnce.espc-d-031-hycom_fcst_glby008_2025072912_t0000_{var}.nc'
-        ds = Dataset(url)
-        print(var)
-        print(ds.dimensions)
-        dss = BoundaryDataset(url)
-    # "https://tds.hycom.org/thredds/catalog/datasets/ESPC-D-V02/data/archive/catalog.html"
-    # "https://tds.hycom.org/thredds/dodsC/datasets/ESPC-D-V02/data/archive/2025/US058GCOM-OPSnce.espc-d-031-hycom_fcst_glby008_2025072912_t0000_Sssh.nc"
-    
     '''
     database = 'ESPC-D-V02'
     vars_of_interest = ['s3z', 't3z', 'u3z', 'v3z', 'ssh']
-    # vars_of_interest = ['ssh']
     # bbox = Bbox(xmin=bbox.xmin, xmax=bbox.xmax, ymin=bbox.ymin, ymax=bbox.ymax)
     # 3 hours per chunk to ensure all data vars are included. Some vars are saved at 1 hour intervals.
-    # TODO: allow subsetting of these time chunks.
     if source == 'forecast':
-        time_chunks = [f'{x:04d}' for x in np.arange(0, 192, 3)]
+        time_chunks = [
+            f'{x:04d}' for x in np.arange(0, forecast_length_hours or 192,
+                                          forecast_freq_hours or 3)
+        ]
     elif source == 'archive':
-        time_chunks = [f'{x:04d}' for x in np.arange(0, 24, 3)]
+        time_chunks = [
+            f'{x:04d}' for x in np.arange(0, forecast_length_hours or 24,
+                                          forecast_freq_hours or 3)
+        ]
     else:
         raise ValueError(f'Invalid source: {source}')
     combined = []
@@ -148,6 +152,7 @@ def get_raw_hycom(date: datetime,
             # base_url = f'https://tds.hycom.org/thredds/dodsC/datasets/{database}/data/archive/{date.year}/US058GCOM-OPSnce.espc-d-031-hycom_fcst_glby008_{date.strftime("%Y%m%d12")}_t{time_chunk}_{var}.nc'  # + DIMENSIONS
             # base_url = f'https://tds.hycom.org/thredds/dodsC/datasets/ESPC-D-V02/data/archive/{date.year}/US058GCOM-OPSnce.espc-d-031-hycom_fcst_glby008_2025072612_t0000_Sssh.nc'
             # TODO: paralellize this portion... pass a url and return an xarray dataset via the netcdf4 dataset.
+            logger.info(f'Raw HYCOM {source} data access. Opening {base_url}')
             xrds = xr.open_dataset(base_url,
                                    decode_times=False,
                                    chunks={
@@ -389,7 +394,9 @@ class BoundaryDataset:
                  xrds: bool = False,
                  archive_data: bool = False,
                  date: datetime = None,
-                 bbox: Bbox = None):
+                 bbox: Bbox = None,
+                 forecast_length_hours: Optional[int] = None,
+                 forecast_freq_hours: Optional[int] = None):
         '''Wraps netcdf4.Dataset to add a cache and retries.
         '''
         # super().__init__(url)
@@ -399,12 +406,20 @@ class BoundaryDataset:
         self.archive_data = archive_data
         self.date = date
         self.bbox = bbox
+        self.forecast_length_hours = forecast_length_hours
+        self.forecast_freq_hours = forecast_freq_hours
 
     @property
     def ds(self):
         if not hasattr(self, '_ds'):
             if self.archive_data:
-                self._ds = get_raw_hycom(self.date, self.bbox)
+                self._ds = get_raw_hycom(
+                    date=self.date,
+                    bbox=self.bbox,
+                    write_to_file=False,
+                    source="archive",
+                    forecast_length_hours=self.forecast_length_hours,
+                    forecast_freq_hours=self.forecast_freq_hours)
             else:
                 # Works for 'archive' and self.open_ds sources which are non-aggregated.
                 self._ds = self.open_ds(
@@ -469,7 +484,6 @@ class OpenBoundaryInventory:
             forecast_mode: means we use a single Dataset for all the available timesteps instead of updating the url for each timestep. in production forecasts we would use this because we are extracting from the latest available forceast.
             archive_data: means we are using the thredds 'archive' data, which is available from 2024 to present but is packaged as a .nc file per 3-hr timestep, so is transformed differently. uses xarray instead of netcdf4.Dataset.
         TODO:
-          - Add a local cache for the data to work around finicky HYCOM server.
           - Replace netcdf4.Dataset with xarray.Dataset for aggregated data (i.e., when archive_data is False)
         '''
         outdir = pathlib.Path(outdir)
