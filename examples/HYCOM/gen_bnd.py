@@ -3,7 +3,7 @@ import logging
 import argparse
 
 from pyschism.mesh.hgrid import Hgrid
-from pyschism.forcing.hycom.hycom2schism import OpenBoundaryInventory
+from pyschism.forcing.hycom.hycom2schism import OpenBoundaryInventory, get_raw_hycom
 '''
 outputs:
     elev2D.th.nc (elev=True)
@@ -71,7 +71,20 @@ if __name__ == "__main__":
         action='store_true',
         default=True,
         help='Generate velocity boundary conditions (default: True)')
-
+    parser.add_argument(
+        '--forecast-mode',
+        action='store_true',
+        default=False,
+        help='Generate boundary conditions from forecast mode (default: False)'
+    )
+    parser.add_argument('--archive-data',
+                        action='store_true',
+                        default=False,
+                        help='Archive data (default: False)')
+    parser.add_argument('--timeout-seconds',
+                        type=int,
+                        default=15,
+                        help='Timeout in seconds (default: 15)')
     args = parser.parse_args()
 
     hgrid = Hgrid.open(args.hgrid, crs='epsg:4326')
@@ -83,7 +96,10 @@ if __name__ == "__main__":
                        elev2D=args.elev2d,
                        TS=args.ts,
                        UV=args.uv,
-                       ocean_bnd_ids=args.ocean_bnd_ids)
+                       ocean_bnd_ids=args.ocean_bnd_ids,
+                       forecast_mode=bool(args.forecast_mode),
+                       archive_data=bool(args.archive_data),
+                       timeout_seconds=args.timeout_seconds)
     except Exception as e:
         logger.error(f'Error fetching data: {e}')
         raise e
