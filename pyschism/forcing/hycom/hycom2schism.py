@@ -742,9 +742,9 @@ class OpenBoundaryInventory:
                     try:
                         if elev2D:
                             #ssh
-                            ssh = np.squeeze(
-                                ds['surf_el'][0, :, :]
-                                if forecast_mode else ds['surf_el'][:, :])
+                            ssh = np.squeeze(ds['surf_el'][
+                                0, :, :] if forecast_mode or archive_data else
+                                             ds['surf_el'][:, :])
                             ssh_int = interp_to_points_2d(
                                 y2,
                                 x2,
@@ -762,9 +762,9 @@ class OpenBoundaryInventory:
                                                         0] = ssh_int
                         if TS:
                             #salt
-                            salt = np.squeeze(
-                                ds['salinity'][0, :, :, :]
-                                if forecast_mode else ds['salinity'][:, :, :])
+                            salt = np.squeeze(ds['salinity'][
+                                0, :, :, :] if forecast_mode or archive_data
+                                              else ds['salinity'][:, :, :])
                             salt_int = interp_to_points_3d(
                                 dep, y2, x2, bxyz,
                                 salt.values if archive_data else salt)
@@ -776,8 +776,8 @@ class OpenBoundaryInventory:
 
                             #temp
                             temp = np.squeeze(ds['water_temp'][
-                                0, :, :, :] if forecast_mode else
-                                              ds['water_temp'][:, :, :])
+                                0, :, :, :] if forecast_mode or archive_data
+                                              else ds['water_temp'][:, :, :])
                             #Convert temp to potential temp
                             # needs to be fixed for xarray
                             ptemp = ConvertTemp(
@@ -794,25 +794,25 @@ class OpenBoundaryInventory:
                                                     0] = temp_int
 
                         if UV:
-                            uvel = np.squeeze(
-                                ds['water_u'][0, :, :, :]
-                                if forecast_mode else ds['water_u'][:, :, :])
-                            vvel = np.squeeze(
-                                ds['water_v'][0, :, :, :]
-                                if forecast_mode else ds['water_v'][:, :, :])
+                            uvel = np.squeeze(ds['water_u'][
+                                0, :, :, :] if forecast_mode or archive_data
+                                              else ds['water_u'][:, :, :])
+                            vvel = np.squeeze(ds['water_v'][
+                                0, :, :, :] if forecast_mode or archive_data
+                                              else ds['water_v'][:, :, :])
                             dst_uv['time'][it] = it * 24 * 3600.
                             #uvel
                             uvel_int = interp_to_points_3d(
-                                dep, y2, x2, bxyz,
-                                uvel.values if archive_data else uvel)
+                                dep, y2, x2, bxyz, uvel.values
+                                if forecast_mode or archive_data else uvel)
                             uvel_int = uvel_int.reshape(zcor2.shape)
                             dst_uv['time_series'][it, ind1:ind2, :,
                                                   0] = uvel_int
 
                             #vvel
                             vvel_int = interp_to_points_3d(
-                                dep, y2, x2, bxyz,
-                                vvel.values if archive_data else vvel)
+                                dep, y2, x2, bxyz, vvel.values
+                                if forecast_mode or archive_data else vvel)
                             vvel_int = vvel_int.reshape(zcor2.shape)
                             dst_uv['time_series'][it, ind1:ind2, :,
                                                   1] = vvel_int
