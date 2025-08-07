@@ -1,14 +1,14 @@
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 import pathlib
 import tempfile
 import subprocess
 import shutil
-from typing import Union
+from typing import Union, Optional
 from time import time
-
+import traceback
 import numpy as np
 import scipy as sp
 import requests
@@ -18,7 +18,7 @@ from netCDF4 import Dataset
 from matplotlib.transforms import Bbox
 import seawater as sw
 import xarray as xr
-
+from functools import lru_cache
 from pyschism.mesh.base import Nodes, Elements
 from pyschism.mesh.vgrid import Vgrid
 
@@ -32,12 +32,12 @@ def convert_longitude(ds, bbox):
     #TODO: figure out why it takes much longer with the second method
     #lon_attr = ds.coords['lon'].attrs
     if bbox.xmin < 0:
-        logger.info(f'Convert HYCOM longitude from [0, 360) to [-180, 180):')
+        logger.debug(f'Convert HYCOM longitude from [0, 360) to [-180, 180):')
         #ds.coords['lon'] = (ds.coords['lon'] + 180) % 360 - 180
         ds['_lon_adjusted'] = xr.where(ds['lon'] > 180, ds['lon'] - 360,
                                        ds['lon'])
     elif bbox.xmin > 0:
-        logger.info(f'Convert HYCOM longitude from [-180, 180) to [0, 360): ')
+        logger.debug(f'Convert HYCOM longitude from [-180, 180) to [0, 360): ')
         #ds.coords['lon'] = (ds.coords['lon'] + 360) % 360 - 180
         ds['_lon_adjusted'] = xr.where(ds['lon'] < 0, ds['lon'] + 360,
                                        ds['lon'])
@@ -51,7 +51,7 @@ def convert_longitude(ds, bbox):
     ds = ds.rename({'_lon_adjusted': 'lon'})
     #ds = ds.sortby(ds.lon)
     #ds.coords['lon'].attrs = lon_attr
-    logger.info(f'swap dims took {time()-t0} seconds!')
+    logger.debug(f'swap dims took {time()-t0} seconds!')
 
     #make sure it is clipped to the bbox
     ds = ds.sel(lon=slice(bbox.xmin - 0.5, bbox.xmax + 0.5))
@@ -80,24 +80,143 @@ def get_database(date, Bbox=None):
         database = f'GLBv0.08/expt_53.X/data/{date.year}'
     else:
         raise ValueError(f'No data fro {date}!')
+    logger.debug(f'Using HYCOM database: {database}')
     return database
 
 
-def get_idxs(date, database, bbox, lonc=None, latc=None):
-
-    if date >= datetime.utcnow():
-        date2 = datetime.utcnow() - timedelta(days=1)
-        baseurl = f'https://tds.hycom.org/thredds/dodsC/{database}/FMRC/runs/GLBy0.08_930_FMRC_RUN_{date2.strftime("%Y-%m-%dT12:00:00Z")}?depth[0:1:-1],lat[0:1:-1],lon[0:1:-1],time[0:1:-1]'
+def get_base_url(date: datetime):
+    '''
+    thredds catalog: https://tds.hycom.org/thredds/catalog.html
+    '''
+    database = get_database(date)
+    if database.startswith('ESPC-D'):
+        base_url = f'https://tds.hycom.org/thredds/dodsC/FMRC_{database}/runs/FMRC_{database}_RUN_{date.strftime("%Y-%m-%dT12:00:00Z")}?'
+        # base_url = f'https://tds.hycom.org/thredds/dodsC/datasets/{database}/data/archive/{date.year}/US058GCOM-OPSnce.espc-d-031-hycom_fcst_glby008_{date.strftime("%Y%m%dT12")}_t0000_{var}.nc?'
     else:
-        baseurl = f'https://tds.hycom.org/thredds/dodsC/FMRC_{database}/runs/FMRS_{database}_RUN_{date.strftime("%Y-%m-%dT12:00:00Z")}?depth[0:1:-1],lat[0:1:-1],lon[0:1:-1],time[0:1:-1]' if database.startswith(
-            'ESPC-D'
-        ) else f'https://tds.hycom.org/thredds/dodsC/{database}?lat[0:1:-1],lon[0:1:-1],time[0:1:-1],depth[0:1:-1]'
-        # baseurl = f'https://tds.hycom.org/thredds/dodsC/{database}/runs/FMRC_ESPC-D-V02_all_RUN_{date.strftime("%Y-%m-%dT12:00:00Z")}?depth[0:1:-1],lat[0:1:-1],lon[0:1:-1],time[0:1:-1]'
-    ds = Dataset(baseurl)
+        if date >= datetime.now(timezone.utc).replace(tzinfo=None):
+            date2 = datetime.now(
+                timezone.utc).replace(tzinfo=None) - timedelta(days=1)
+            base_url = f'https://tds.hycom.org/thredds/dodsC/{database}/FMRC/runs/GLBy0.08_930_FMRC_RUN_{date2.strftime("%Y-%m-%dT12:00:00Z")}?'
+        else:
+            base_url = f'https://tds.hycom.org/thredds/dodsC/{database}?'
+    return base_url
+
+
+def get_raw_hycom(date: datetime,
+                  bbox: Bbox,
+                  write_to_file: bool = False,
+                  source: str = 'archive',
+                  forecast_length_hours: Optional[int] = None,
+                  forecast_freq_hours: Optional[int] = None) -> xr.Dataset:
+    '''
+    Args:
+        date: datetime object which time to lookup in the dataset
+        bbox: Bbox object
+        write_to_file: bool
+        source: str
+        forecast_length_hours: Optional[int]
+        forecast_freq_hours: Optional[int]
+
+    Returns:
+        xarray.Dataset
+
+    Works for 'archive' and 'forecast' data sources which are non-aggregated.
+
+    This process handles the non-aggregated data avalable fro mthe tds.ycom.org/thredds/dodsC source.
+    '''
+    database = 'ESPC-D-V02'
+    vars_of_interest = ['s3z', 't3z', 'u3z', 'v3z', 'ssh']
+    # bbox = Bbox(xmin=bbox.xmin, xmax=bbox.xmax, ymin=bbox.ymin, ymax=bbox.ymax)
+    # 3 hours per chunk to ensure all data vars are included. Some vars are saved at 1 hour intervals.
+    if source == 'forecast':
+        time_chunks = [
+            f'{x:04d}' for x in np.arange(0, forecast_length_hours or 192,
+                                          forecast_freq_hours or 3)
+        ]
+    elif source == 'archive':
+        time_chunks = [
+            f'{x:04d}' for x in np.arange(0, forecast_length_hours or 24,
+                                          forecast_freq_hours or 3)
+        ]
+    else:
+        raise ValueError(f'Invalid source: {source}')
+    combined = []
+    for var in vars_of_interest:
+        dss = []
+        for time_chunk in time_chunks:
+            # forecast: only has last ten dayts but has longer time series
+            # base_url = f'https://tds.hycom.org/thredds/dodsC/datasets/{database}/data/archive/{date.year}/US058GCOM-OPSnce.espc-d-031-hycom_fcst_glby008__{date.strftime("%Y%m%d12")}_t{time_chunk}_{var}.nc'  # + DIMENSIONS
+            if source == 'forecast':
+                base_url = f'https://tds.hycom.org/thredds/dodsC/datasets/{database}/data/forecasts/US058GCOM-OPSnce.espc-d-031-hycom_fcst_glby008_{date.strftime("%Y%m%d12")}_t{time_chunk}_{var}.nc'
+            elif source == 'archive':
+                base_url = f'https://tds.hycom.org/thredds/dodsC/datasets/{database}/data/archive/{date.year}/US058GCOM-OPSnce.espc-d-031-hycom_fcst_glby008_{date.strftime("%Y%m%d12")}_t{time_chunk}_{var}.nc'
+            # archive
+            # base_url = f'https://tds.hycom.org/thredds/dodsC/datasets/{database}/data/archive/{date.year}/US058GCOM-OPSnce.espc-d-031-hycom_fcst_glby008_{date.strftime("%Y%m%d12")}_t{time_chunk}_{var}.nc'  # + DIMENSIONS
+            # base_url = f'https://tds.hycom.org/thredds/dodsC/datasets/ESPC-D-V02/data/archive/{date.year}/US058GCOM-OPSnce.espc-d-031-hycom_fcst_glby008_2025072612_t0000_Sssh.nc'
+            # TODO: paralellize this portion... pass a url and return an xarray dataset via the netcdf4 dataset.
+            logger.info(f'Raw HYCOM {source} data access. Opening {base_url}')
+            xrds = xr.open_dataset(base_url,
+                                   decode_times=False,
+                                   chunks={
+                                       'lat': 100,
+                                       'lon': 100
+                                   }).sel(lon=slice(bbox.xmin, bbox.xmax),
+                                          lat=slice(bbox.ymin, bbox.ymax))
+            dss.append(xrds)
+        combined.append(
+            xr.combine_nested(dss, 'time', combine_attrs='override'))
+    subset = xr.merge(combined, combine_attrs='override')
+    if write_to_file:
+        subset.to_netcdf(f'hycom_archive_{date.strftime("%Y%m%d")}.nc')
+    return subset
+
+
+def decode_nc_times(nc_time_array):
+    return nc.num2date(nc_time_array,
+                       units=nc_time_array.units,
+                       only_use_cftime_datetimes=False)
+
+
+def get_idxs(date: datetime,
+             database: str,
+             bbox: Bbox,
+             lonc: Optional[float] = None,
+             latc: Optional[float] = None,
+             archive_data: bool = False,
+             forecast_mode: bool = False,
+             url_date: str = None):
+    '''
+    Args:
+    date: datetime object which time to lookup in the dataset
+    database: str
+    bbox: Bbox object
+    lonc: Optional[float]
+    latc: Optional[float]
+    archive_data: bool
+    forecast_mode: bool are we extracting all dates from the same forecast (i.e., same base_url)?
+    url_date: datetime if forecast_mode is True we use this date to fetch the dataset from which date will be extracted. (If forecast_mode is False, url_date = date)
+    
+    Returns:
+    time_idx: int
+    lon_idx1: int
+    lon_idx2: int
+    lat_idx1: int
+    '''
+    logger.debug(f'Getting idxs for {date}')
+    if not forecast_mode:
+        url_date = date
+    else:
+        assert url_date is not None, 'url_date is required for forecast_mode'
+    DIMENSIONS = 'lat[0:1:-1],lon[0:1:-1],time[0:1:-1],depth[0:1:-1]'
+    baseurl = get_base_url(url_date) + DIMENSIONS
+    ds = BoundaryDataset(baseurl,
+                         xrds=archive_data,
+                         archive_data=archive_data,
+                         date=url_date,
+                         bbox=bbox)
     time1 = ds['time']
-    times = nc.num2date(time1,
-                        units=time1.units,
-                        only_use_cftime_datetimes=False)
+    times = decode_nc_times(time1)
+    logger.debug(f'times in ds from date {url_date}: {times}')
 
     lon = ds['lon'][:]
     lat = ds['lat'][:]
@@ -105,18 +224,26 @@ def get_idxs(date, database, bbox, lonc=None, latc=None):
 
     #check if hycom's lon is the same range as schism's
     same = True
+    # TODO: why isn't this using convert_longitude()??
     if not (bbox.xmin >= lon.min() and bbox.xmax <= lon.max()):
         same = False
         if lon.min() >= 0:
-            logger.info(
+            logger.debug(
                 f'Convert HYCOM longitude from [0, 360) to [-180, 180):')
             idxs = lon >= 180
-            lon[idxs] = lon[idxs] - 360
+            #  ds.ds['lon'] = (ds.ds['lon'] + 180) % 360 - 180
+            if archive_data:
+                lon.values[idxs] = lon[idxs] - 360
+            else:
+                lon[idxs] = lon[idxs] - 360
         elif lon.min() <= 0:
-            logger.info(
+            logger.debug(
                 f'Convert HYCOM longitude from [-180, 180) to [0, 360):')
             idxs = lon <= 0
-            lon[idxs] = lon[idxs] + 360
+            if archive_data:
+                lon.values[idxs] = lon[idxs] + 360
+            else:
+                lon[idxs] = lon[idxs] + 360
 
     lat_idxs = np.where((lat >= bbox.ymin - 0.5) & (lat <= bbox.ymax + 0.5))[0]
     lon_idxs = np.where((lon >= bbox.xmin - 0.5) & (lon <= bbox.xmax + 0.5))[0]
@@ -142,19 +269,22 @@ def get_idxs(date, database, bbox, lonc=None, latc=None):
     idxs = np.where(date == times)[0]
     #check if time_idx is empty
     if len(idxs) == 0:
+        logger.warning(f'No data found for date {date} given times {times}')
         #If there is missing data, use the data from the next days, the maximum searching days is 3. Otherwise, stop.
         for i in np.arange(0, 3):
             date_before = (date + timedelta(days=int(i) + 1)
                            )  #.astype(datetime)
-            logger.info(f'Try replacing the missing data from {date_before}')
+            logger.warning(
+                f'Try replacing the missing data from {date_before}')
             idxs = np.where(date_before == times)[0]
             if len(idxs) == 0:
                 continue
             else:
                 break
     if len(idxs) == 0:
-        logger.info(f'No date for date {date}')
+        logger.error(f'No date for date {date}')
         sys.exit()
+
     time_idx = idxs.item()
 
     ds.close()
@@ -163,8 +293,21 @@ def get_idxs(date, database, bbox, lonc=None, latc=None):
 
 
 def transform_ll_to_cpp(lon, lat, lonc=-77.07, latc=24.0):
+    '''
+    Transforms longitude and latitude values to the CPP coordinate system. A local projection.
+    Args:
+
+    lon: 1D array of longitude values
+        lat: 1D array of latitude values
+        lonc: central longitude
+        latc: central latitude
+    Returns:
+        lon_new: 1D array of transformed longitude values
+        lat_new: 1D array of transformed latitude values
+    '''
     longitude = lon / 180 * np.pi
     latitude = lat / 180 * np.pi
+    # earth radius in meters
     radius = 6378206.4
     loncc = lonc / 180 * np.pi
     latcc = latc / 180 * np.pi
@@ -182,7 +325,7 @@ def interp_to_points_3d(dep, y2, x2, bxyz, val):
     val[idxs] = float('nan')
 
     if not np.all(x2[:-1] <= x2[1:]):
-        logger.info(
+        logger.warning(
             'x2 is not in stricitly ascending order! Sorting x2 and val')
         idxs = np.argsort(x2)
         x2 = x2[idxs]
@@ -200,22 +343,21 @@ def interp_to_points_3d(dep, y2, x2, bxyz, val):
                                                 bxyz[idxs, :], 'nearest')
     idxs = np.isnan(val_int)
     if np.sum(idxs) != 0:
-        logger.info(f'There is still missing value for {val}')
+        logger.error(f'There is still missing value for {val}')
         sys.exit()
     return val_int
 
 
-def interp_to_points_2d(y2, x2, bxy, val):
+def interp_to_points_2d(y2, x2, bxy, val, archive_data: bool = False):
     idxs = np.where(abs(val) > 10000)
     val[idxs] = float('nan')
 
     if not np.all(x2[:-1] <= x2[1:]):
-        logger.info(
+        logger.warning(
             'x2 is not in stricitly ascending order! Sorting x2 and val')
         idxs = np.argsort(x2)
         x2 = x2[idxs]
         val = val[:, idxs]
-
     val_fd = sp.interpolate.RegularGridInterpolator((y2, x2),
                                                     np.squeeze(val),
                                                     'linear',
@@ -228,7 +370,7 @@ def interp_to_points_2d(y2, x2, bxy, val):
                                                 bxy[idxs, :], 'nearest')
     idxs = np.isnan(val_int)
     if np.sum(idxs) != 0:
-        logger.info(f'There is still missing value for {val}')
+        logger.error(f'There is still missing value for {val}')
         sys.exit()
     return val_int
 
@@ -244,24 +386,99 @@ def ConvertTemp(salt, temp, dep):
     return ptemp
 
 
+@lru_cache(maxsize=100)
+class BoundaryDataset:
+
+    _timeout = 15  # seconds
+
+    def __init__(self,
+                 url,
+                 xrds: bool = False,
+                 archive_data: bool = False,
+                 date: datetime = None,
+                 bbox: Bbox = None,
+                 forecast_length_hours: Optional[int] = None,
+                 forecast_freq_hours: Optional[int] = None):
+        '''Wraps netcdf4.Dataset to add a cache and retries.
+        '''
+        # super().__init__(url)
+        self._cache = {}
+        self.url = url
+        self.xrds = xrds
+        self.archive_data = archive_data
+        self.date = date
+        self.bbox = bbox
+        self.forecast_length_hours = forecast_length_hours
+        self.forecast_freq_hours = forecast_freq_hours
+
+    @property
+    def ds(self):
+        if not hasattr(self, '_ds'):
+            if self.archive_data:
+                self._ds = get_raw_hycom(
+                    date=self.date,
+                    bbox=self.bbox,
+                    write_to_file=False,
+                    source="archive",
+                    forecast_length_hours=self.forecast_length_hours,
+                    forecast_freq_hours=self.forecast_freq_hours)
+            else:
+                # Works for 'archive' and self.open_ds sources which are non-aggregated.
+                self._ds = self.open_ds(
+                    self.url) if not self.xrds else self.open_xrds(self.url)
+        return self._ds
+
+    @staticmethod
+    def open_ds(url: str):
+        return Dataset(url)
+
+    @staticmethod
+    def open_xrds(url: str):
+        return xr.open_dataset(url,
+                               decode_times=False,
+                               chunks={
+                                   'lat': 100,
+                                   'lon': 100
+                               })
+
+    def close(self):
+        '''We dont want to clear the cache bc it is associated with this instance and this instance itself is cached.'''
+        pass
+
+    def __getitem__(self, key):
+        if key not in self._cache:
+            logger.debug(f'CACHE MISS for {key}')
+            self._cache[key] = self.ds[key]
+        else:
+            logger.info(f'CACHE HIT for {key}')
+        return self._cache[key]
+
+
 class OpenBoundaryInventory:
 
     def __init__(self, hgrid, vgrid=None):
         self.hgrid = hgrid
         self.vgrid = Vgrid.default() if vgrid is None else vgrid
 
-    def fetch_data(self,
-                   outdir: Union[str, os.PathLike],
-                   start_date,
-                   rnday,
-                   ocean_bnd_ids=[0],
-                   elev2D=True,
-                   TS=True,
-                   UV=True,
-                   restart=False,
-                   adjust2D=False,
-                   lats=None,
-                   msl_shifts=None):
+    def fetch_data(
+        self,
+        outdir: Union[str, os.PathLike],
+        start_date,
+        rnday,
+        ocean_bnd_ids=[0],
+        elev2D=True,
+        TS=True,
+        UV=True,
+        restart=False,
+        adjust2D=False,
+        lats=None,
+        msl_shifts=None,
+        forecast_mode: bool = False,
+        archive_data: bool = False,
+        timeout_seconds: int = 15,
+        forecast_length_hours: Optional[int] = None,
+        forecast_freq_hours: Optional[int] = None,
+    ):
         '''
         Fetch data from HYCOM and save to netcdf files.
         Args:
@@ -270,24 +487,31 @@ class OpenBoundaryInventory:
             rnday: number of days
             ocean_bnd_ids: open boundary ids
             elev2D: whether to save 2D elevation data
-        
+            forecast_mode: means we use a single Dataset for all the available timesteps instead of updating the url for each timestep. in production forecasts we would use this because we are extracting from the latest available forceast.
+            archive_data: means we are using the thredds 'archive' data, which is available from 2024 to present but is packaged as a .nc file per 3-hr timestep, so is transformed differently. uses xarray instead of netcdf4.Dataset.
         TODO:
-          - Add a local cache for the data to work around finicky HYCOM server.
+          - Replace netcdf4.Dataset with xarray.Dataset for aggregated data (i.e., when archive_data is False)
         '''
         outdir = pathlib.Path(outdir)
 
         self.start_date = start_date
         self.rnday = rnday
-        self.timevector = np.arange(
-            self.start_date, self.start_date + timedelta(days=self.rnday + 1),
-            timedelta(days=1)).astype(datetime)
-
+        if forecast_mode:
+            self.start_date = self.start_date.replace(hour=12)
+            self.timevector = np.arange(
+                self.start_date, self.start_date + timedelta(days=self.rnday),
+                timedelta(hours=12)).astype(datetime)
+        else:
+            self.timevector = np.arange(
+                self.start_date,
+                self.start_date + timedelta(days=self.rnday + 1),
+                timedelta(days=1)).astype(datetime)
         #Get open boundary
         gdf = self.hgrid.boundaries.open.copy()
         opbd = []
         #for boundary in gdf.itertuples():
         #    opbd.extend(list(boundary.indexes))
-        logger.info(f'ocean_bnd_ids: {ocean_bnd_ids}')
+        logger.debug(f'ocean_bnd_ids: {ocean_bnd_ids}')
         if len(ocean_bnd_ids) > gdf.shape[0]:
             raise ValueError(
                 f'ocean_bnd_ids: {ocean_bnd_ids} is out of range of the number of open boundaries: {gdf.shape[0]}'
@@ -320,7 +544,7 @@ class OpenBoundaryInventory:
             #y2i=np.tile(yi,[nvrt,1]).T
             #bxyz=np.c_[zcor2.reshape(np.size(zcor2)),y2i.reshape(np.size(y2i)),x2i.reshape(np.size(x2i))]
             #logger.info('Computing SCHISM zcor is done!')
-
+        logger.info(f'Creating netcdf files in {outdir}')
         #create netcdf
         ntimes = self.rnday + 1
         nComp1 = 1
@@ -425,7 +649,9 @@ class OpenBoundaryInventory:
             dst_uv = Dataset(outdir / 'uv3D.th.nc', 'a', format='NETCDF4')
             time_idx_restart = dst_uv['time'][:].shape[0]
 
-        logger.info('**** Accessing GOFS data*****')
+        logger.info(
+            f'**** Accessing GOFS data with forecast_mode={forecast_mode} and archive_data={archive_data}*****'
+        )
         t0 = time()
 
         if restart == False:
@@ -436,12 +662,13 @@ class OpenBoundaryInventory:
             timevector = self.timevector[time_idx_restart - 1:]
             it0 = time_idx_restart - 1
 
-        for it1, date in enumerate(timevector):
-
+        for it1, ds_date in enumerate(timevector):
             it = it0 + it1
 
-            database = get_database(date)
-            logger.info(f'Fetching data for {date} from database {database}')
+            database = get_database(
+                timevector[0] if forecast_mode else ds_date)
+            logger.info(
+                f'Fetching data for {ds_date} from database {database}')
 
             #loop over each open boundary
             ind1 = 0
@@ -458,6 +685,7 @@ class OpenBoundaryInventory:
                 blonc = blon.mean()
                 blatc = blat.mean()
                 #logger.info(f'blonc = {blon.mean()}, blatc = {blat.mean()}')
+                # this is some spoooky stuff. But we're transforing to a local projection.
                 xi, yi = transform_ll_to_cpp(blon, blat, blonc, blatc)
                 bxy = np.c_[yi, xi]
 
@@ -478,96 +706,137 @@ class OpenBoundaryInventory:
                 bbox = Bbox.from_extents(xmin, ymin, xmax, ymax)
 
                 time_idx, lon_idx1, lon_idx2, lat_idx1, lat_idx2, x2, y2, _ = get_idxs(
-                    date, database, bbox, lonc=blonc, latc=blatc)
+                    ds_date,
+                    database,
+                    bbox,
+                    lonc=blonc,
+                    latc=blatc,
+                    archive_data=archive_data,
+                    forecast_mode=forecast_mode,
+                    url_date=timevector[0] if forecast_mode else ds_date)
 
-                if date >= datetime.utcnow():
-                    date2 = datetime.utcnow() - timedelta(days=1)
-                    # Real time ESPC runs used if database.startswith('ESPC-D') is True; should be used when, e.g. database = 'ESPC-D-V02_all'
-                    url_base = f'https://tds.hycom.org/thredds/dodsC/FMRC_{database}/runs/FMRS_{database}_RUN_' if database.startswith(
-                        'ESPC-D'
-                    ) else f'https://tds.hycom.org/thredds/dodsC/{database}/FMRC/runs/GLBy0.08_930_FMRC_RUN_'
-                    url = url_base + \
-                        f'{date2.strftime("%Y-%m-%dT12:00:00Z")}?depth[0:1:-1],lat[{lat_idx1}:1:{lat_idx2}],' + \
-                        f'lon[{lon_idx1}:1:{lon_idx2}],time[{time_idx}],' + \
-                        f'surf_el[{time_idx}][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
+                url_data_subsets = f'surf_el[{time_idx}][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
                         f'water_temp[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
                         f'salinity[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
                         f'water_u[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
                         f'water_v[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}]'
-
-                else:
-                    url = f'https://tds.hycom.org/thredds/dodsC/FMRC_{database}/runs/FMRS_{database}_RUN_{date.strftime("%Y-%m-%dT12:00:00Z")}?' if database.startswith(
-                        'ESPC-D'
-                    ) else f'https://tds.hycom.org/thredds/dodsC/{database}?'
-                    url = url + f'lat[{lat_idx1}:1:{lat_idx2}],' + \
-                        f'lon[{lon_idx1}:1:{lon_idx2}],depth[0:1:-1],time[{time_idx}],' + \
-                        f'surf_el[{time_idx}][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
-                        f'water_temp[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
-                        f'salinity[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
-                        f'water_u[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
-                        f'water_v[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}]'
-                #logger.info(url)
-
-                ds = Dataset(url)
+                DIMENSIONS = f'depth[0:1:-1],lat[{lat_idx1}:1:{lat_idx2}],lon[{lon_idx1}:1:{lon_idx2}],time[{time_idx}],'
+                logger.info(
+                    f'base url: {get_base_url(timevector[0] if forecast_mode else ds_date)}'
+                )
+                url = get_base_url(timevector[0] if forecast_mode else ds_date
+                                   ) + DIMENSIONS + url_data_subsets
+                # Extract data
+                ds = BoundaryDataset(
+                    url,
+                    xrds=archive_data,
+                    archive_data=archive_data,
+                    date=timevector[0] if forecast_mode else ds_date,
+                    bbox=bbox,
+                    forecast_length_hours=forecast_length_hours,
+                    forecast_freq_hours=forecast_freq_hours)
+                logger.debug(
+                    f"fetching url {url} \nwith a BoundaryDataset instance with id {id(ds)}"
+                )
                 dep = ds['depth'][:]
 
                 logger.info(
-                    f'****Interpolation starts for boundary {ibnd}****')
-
+                    f'****Interpolation starts for boundary {ibnd} and date {ds_date}****'
+                )
                 #ndt[it]=it*24*3600.
+                time_limit = time() + timeout_seconds
+                while True:
+                    try:
+                        if elev2D:
+                            #ssh
+                            ssh = np.squeeze(ds['surf_el'][
+                                0, :, :] if forecast_mode or archive_data else
+                                             ds['surf_el'][:, :])
+                            ssh_int = interp_to_points_2d(
+                                y2,
+                                x2,
+                                bxy,
+                                ssh.values if archive_data else ssh,
+                                archive_data=archive_data)
+                            dst_elev['time'][it] = it * 24 * 3600.
+                            if adjust2D:
+                                elev_adjust = np.interp(blat, lats, msl_shifts)
+                                dst_elev['time_series'][
+                                    it, ind1:ind2, 0,
+                                    0] = ssh_int + elev_adjust
+                            else:
+                                dst_elev['time_series'][it, ind1:ind2, 0,
+                                                        0] = ssh_int
+                        if TS:
+                            #salt
+                            salt = np.squeeze(ds['salinity'][
+                                0, :, :, :] if forecast_mode or archive_data
+                                              else ds['salinity'][:, :, :])
+                            salt_int = interp_to_points_3d(
+                                dep, y2, x2, bxyz,
+                                salt.values if archive_data else salt)
+                            salt_int = salt_int.reshape(zcor2.shape)
+                            #timeseries_s[it,:,:,0]=salt_int
+                            dst_salt['time'][it] = it * 24 * 3600.
+                            dst_salt['time_series'][it, ind1:ind2, :,
+                                                    0] = salt_int
 
-                if elev2D:
-                    #ssh
-                    ssh = np.squeeze(ds['surf_el'][:, :])
+                            #temp
+                            temp = np.squeeze(ds['water_temp'][
+                                0, :, :, :] if forecast_mode or archive_data
+                                              else ds['water_temp'][:, :, :])
+                            #Convert temp to potential temp
+                            # needs to be fixed for xarray
+                            ptemp = ConvertTemp(
+                                salt.values if archive_data else salt,
+                                temp.values if archive_data else temp,
+                                dep.values if archive_data else dep)
 
-                    ssh_int = interp_to_points_2d(y2, x2, bxy, ssh)
-                    dst_elev['time'][it] = it * 24 * 3600.
-                    if adjust2D:
-                        elev_adjust = np.interp(blat, lats, msl_shifts)
-                        dst_elev['time_series'][it, ind1:ind2, 0,
-                                                0] = ssh_int + elev_adjust
-                    else:
-                        dst_elev['time_series'][it, ind1:ind2, 0, 0] = ssh_int
+                            temp_int = interp_to_points_3d(
+                                dep, y2, x2, bxyz, ptemp)
+                            temp_int = temp_int.reshape(zcor2.shape)
+                            #timeseries_t[it,:,:,0]=temp_int
+                            dst_temp['time'][it] = it * 24 * 3600.
+                            dst_temp['time_series'][it, ind1:ind2, :,
+                                                    0] = temp_int
 
-                if TS:
-                    #salt
-                    salt = np.squeeze(ds['salinity'][:, :, :])
+                        if UV:
+                            uvel = np.squeeze(ds['water_u'][
+                                0, :, :, :] if forecast_mode or archive_data
+                                              else ds['water_u'][:, :, :])
+                            vvel = np.squeeze(ds['water_v'][
+                                0, :, :, :] if forecast_mode or archive_data
+                                              else ds['water_v'][:, :, :])
+                            dst_uv['time'][it] = it * 24 * 3600.
+                            #uvel
+                            uvel_int = interp_to_points_3d(
+                                dep, y2, x2, bxyz,
+                                uvel.values if archive_data else uvel)
+                            uvel_int = uvel_int.reshape(zcor2.shape)
+                            dst_uv['time_series'][it, ind1:ind2, :,
+                                                  0] = uvel_int
 
-                    salt_int = interp_to_points_3d(dep, y2, x2, bxyz, salt)
-                    salt_int = salt_int.reshape(zcor2.shape)
-                    #timeseries_s[it,:,:,0]=salt_int
-                    dst_salt['time'][it] = it * 24 * 3600.
-                    dst_salt['time_series'][it, ind1:ind2, :, 0] = salt_int
+                            #vvel
+                            vvel_int = interp_to_points_3d(
+                                dep, y2, x2, bxyz,
+                                vvel.values if archive_data else vvel)
+                            vvel_int = vvel_int.reshape(zcor2.shape)
+                            dst_uv['time_series'][it, ind1:ind2, :,
+                                                  1] = vvel_int
+                            #timeseries_uv[it,:,:,1]=vvel_int
 
-                    #temp
-                    temp = np.squeeze(ds['water_temp'][:, :, :])
-
-                    #Convert temp to potential temp
-                    ptemp = ConvertTemp(salt, temp, dep)
-
-                    temp_int = interp_to_points_3d(dep, y2, x2, bxyz, ptemp)
-                    temp_int = temp_int.reshape(zcor2.shape)
-                    #timeseries_t[it,:,:,0]=temp_int
-                    dst_temp['time'][it] = it * 24 * 3600.
-                    dst_temp['time_series'][it, ind1:ind2, :, 0] = temp_int
-
-                if UV:
-                    uvel = np.squeeze(ds['water_u'][:, :, :])
-                    vvel = np.squeeze(ds['water_v'][:, :, :])
-
-                    dst_uv['time'][it] = it * 24 * 3600.
-                    #uvel
-                    uvel_int = interp_to_points_3d(dep, y2, x2, bxyz, uvel)
-                    uvel_int = uvel_int.reshape(zcor2.shape)
-                    dst_uv['time_series'][it, ind1:ind2, :, 0] = uvel_int
-
-                    #vvel
-                    vvel_int = interp_to_points_3d(dep, y2, x2, bxyz, vvel)
-                    vvel_int = vvel_int.reshape(zcor2.shape)
-                    dst_uv['time_series'][it, ind1:ind2, :, 1] = vvel_int
-                    #timeseries_uv[it,:,:,1]=vvel_int
-
-                ds.close()
+                        ds.close()
+                        break
+                    except Exception as e:
+                        if time() > time_limit:
+                            logger.error(
+                                'Timed out fetching data in OpenBoundaryInventory.fetch_data'
+                            )
+                            logger.error(
+                                f'Error fetching data for boundary {ibnd}: {e}'
+                            )
+                            ds.close()
+                            raise e
         logger.info(f'Writing *th.nc takes {time()-t0} seconds')
 
 
@@ -782,7 +1051,7 @@ class Nudge:
             it = it0 + it1
 
             database = get_database(date)
-            logger.info(f'Fetching data for {date} from database {database}')
+            logger.debug(f'Fetching data for {date} from database {database}')
 
             ind1 = 0
             ind2 = 0
@@ -824,23 +1093,10 @@ class Nudge:
                     logger.info(
                         f'Local copy of HYCOM file {hycom_local_copy} does not exist. Downloading...'
                     )
-                    if date >= datetime.utcnow():
-                        date2 = datetime.utcnow() - timedelta(days=1)
-                        # Real time ESPC runs used if database.startswith('ESPC-D') is True; should be used when, e.g. database = 'ESPC-D-V02_all'
-                        url_base = f'https://tds.hycom.org/thredds/dodsC/FMRC_{database}/runs/FMRS_{database}_RUN_' if database.startswith(
-                            'ESPC-D'
-                        ) else f'https://tds.hycom.org/thredds/dodsC/{database}/FMRC/runs/GLBy0.08_930_FMRC_RUN_'
-                        url = url_base + \
-                            f'{date2.strftime("%Y-%m-%dT12:00:00Z")}?depth[0:1:-1],lat[{lat_idx1}:1:{lat_idx2}],' + \
-                            f'lon[{lon_idx1}:1:{lon_idx2}],time[{time_idx}],' + \
-                            f'water_temp[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
-                            f'salinity[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}]'
-
-                    else:
-                        url=f'https://tds.hycom.org/thredds/dodsC/{database}?lat[{lat_idx1}:1:{lat_idx2}],' + \
-                            f'lon[{lon_idx1}:1:{lon_idx2}],depth[0:1:-1],time[{time_idx}],' + \
-                            f'water_temp[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
-                            f'salinity[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}]'
+                    DIMENSIONS = f'depth[0:1:-1],lat[{lat_idx1}:1:{lat_idx2}],lon[{lon_idx1}:1:{lon_idx2}],time[{time_idx}],'
+                    url_data_subsets = f'water_temp[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
+                        f'salinity[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}]'
+                    url = get_base_url(date) + DIMENSIONS + url_data_subsets
                     # Download the data
                     xr.open_dataset(url).to_netcdf(hycom_local_copy)
 
@@ -852,7 +1108,7 @@ class Nudge:
 
                 #Convert temp to potential temp
                 dep = ds['depth'][:]
-                ptemp = ConvertTemp(salt, temp, dep)
+                ptemp = ConvertTemp(salt, temp, dep, xrds=False)
 
                 logger.info('****Interpolation starts****')
 
@@ -944,7 +1200,7 @@ class DownloadHycom:
                 salt = ds.salinity.values
                 dep = ds.depth.values
 
-                ptemp = ConvertTemp(salt, temp, dep)
+                ptemp = ConvertTemp(salt, temp, dep, xrds=False)
                 #drop water_temp variable and add new temperature variable
                 ds = ds.drop('water_temp')
                 ds['temperature'] = (['time', 'depth', 'lat', 'lon'], ptemp)
