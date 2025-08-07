@@ -154,7 +154,9 @@ def get_raw_hycom(date: datetime,
             # base_url = f'https://tds.hycom.org/thredds/dodsC/datasets/{database}/data/archive/{date.year}/US058GCOM-OPSnce.espc-d-031-hycom_fcst_glby008_{date.strftime("%Y%m%d12")}_t{time_chunk}_{var}.nc'  # + DIMENSIONS
             # base_url = f'https://tds.hycom.org/thredds/dodsC/datasets/ESPC-D-V02/data/archive/{date.year}/US058GCOM-OPSnce.espc-d-031-hycom_fcst_glby008_2025072612_t0000_Sssh.nc'
             # TODO: paralellize this portion... pass a url and return an xarray dataset via the netcdf4 dataset.
-            logger.info(f'Raw HYCOM {source} data access. Opening {base_url}')
+            logger.info(
+                f'Raw HYCOM {source} data access for {var}.\nOpening {base_url}'
+            )
             xrds = xr.open_dataset(base_url,
                                    decode_times=False,
                                    chunks={
@@ -184,7 +186,9 @@ def get_idxs(date: datetime,
              latc: Optional[float] = None,
              archive_data: bool = False,
              forecast_mode: bool = False,
-             url_date: str = None):
+             url_date: str = None,
+             forecast_length_hours: int = None,
+             forecast_freq_hours: int = None):
     '''
     Args:
     date: datetime object which time to lookup in the dataset
@@ -213,7 +217,9 @@ def get_idxs(date: datetime,
                          xrds=archive_data,
                          archive_data=archive_data,
                          date=url_date,
-                         bbox=bbox)
+                         bbox=bbox,
+                         forecast_length_hours=forecast_length_hours,
+                         forecast_freq_hours=forecast_freq_hours)
     time1 = ds['time']
     times = decode_nc_times(time1)
     logger.debug(f'times in ds from date {url_date}: {times}')
@@ -661,7 +667,6 @@ class OpenBoundaryInventory:
             #restart from one day earlier
             timevector = self.timevector[time_idx_restart - 1:]
             it0 = time_idx_restart - 1
-
         for it1, ds_date in enumerate(timevector):
             it = it0 + it1
 
@@ -704,7 +709,6 @@ class OpenBoundaryInventory:
                 xmin, xmax = np.min(blon), np.max(blon)
                 ymin, ymax = np.min(blat), np.max(blat)
                 bbox = Bbox.from_extents(xmin, ymin, xmax, ymax)
-
                 time_idx, lon_idx1, lon_idx2, lat_idx1, lat_idx2, x2, y2, _ = get_idxs(
                     ds_date,
                     database,
@@ -713,8 +717,9 @@ class OpenBoundaryInventory:
                     latc=blatc,
                     archive_data=archive_data,
                     forecast_mode=forecast_mode,
-                    url_date=timevector[0] if forecast_mode else ds_date)
-
+                    url_date=timevector[0] if forecast_mode else ds_date,
+                    forecast_length_hours=forecast_length_hours,
+                    forecast_freq_hours=forecast_freq_hours)
                 url_data_subsets = f'surf_el[{time_idx}][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
                         f'water_temp[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
                         f'salinity[{time_idx}][0:1:39][{lat_idx1}:1:{lat_idx2}][{lon_idx1}:1:{lon_idx2}],' + \
