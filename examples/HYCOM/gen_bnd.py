@@ -85,6 +85,14 @@ if __name__ == "__main__":
                         type=int,
                         default=15,
                         help='Timeout in seconds (default: 15)')
+    parser.add_argument('--forecast_length_hours',
+                        type=int,
+                        default=15,
+                        help='forecast_length_hours')
+    parser.add_argument('--forecast_freq_hours',
+                        type=int,
+                        default=15,
+                        help='forecast_freq_hours')
     args = parser.parse_args()
 
     hgrid = Hgrid.open(args.hgrid, crs='epsg:4326')
@@ -99,7 +107,9 @@ if __name__ == "__main__":
                        ocean_bnd_ids=args.ocean_bnd_ids,
                        forecast_mode=bool(args.forecast_mode),
                        archive_data=bool(args.archive_data),
-                       timeout_seconds=args.timeout_seconds)
+                       timeout_seconds=args.timeout_seconds,
+                       forecast_length_hours=args.forecast_length_hours,
+                       forecast_freq_hours=args.forecast_freq_hours)
     except Exception as e:
         logger.error(f'Error fetching data: {e}')
         raise e

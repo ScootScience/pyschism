@@ -85,10 +85,12 @@ def get_database(date, Bbox=None):
 
 
 def get_base_url(date: datetime):
-
+    '''
+    thredds catalog: https://tds.hycom.org/thredds/catalog.html
+    '''
     database = get_database(date)
     if database.startswith('ESPC-D'):
-        base_url = f'https://tds.hycom.org/thredds/dodsC/FMRC_{database}/runs/FMRS_{database}_RUN_{date.strftime("%Y-%m-%dT12:00:00Z")}?'
+        base_url = f'https://tds.hycom.org/thredds/dodsC/FMRC_{database}/runs/FMRC_{database}_RUN_{date.strftime("%Y-%m-%dT12:00:00Z")}?'
         # base_url = f'https://tds.hycom.org/thredds/dodsC/datasets/{database}/data/archive/{date.year}/US058GCOM-OPSnce.espc-d-031-hycom_fcst_glby008_{date.strftime("%Y%m%dT12")}_t0000_{var}.nc?'
     else:
         if date >= datetime.now(timezone.utc).replace(tzinfo=None):
@@ -458,21 +460,25 @@ class OpenBoundaryInventory:
         self.hgrid = hgrid
         self.vgrid = Vgrid.default() if vgrid is None else vgrid
 
-    def fetch_data(self,
-                   outdir: Union[str, os.PathLike],
-                   start_date,
-                   rnday,
-                   ocean_bnd_ids=[0],
-                   elev2D=True,
-                   TS=True,
-                   UV=True,
-                   restart=False,
-                   adjust2D=False,
-                   lats=None,
-                   msl_shifts=None,
-                   forecast_mode: bool = False,
-                   archive_data: bool = False,
-                   timeout_seconds: int = 15):
+    def fetch_data(
+        self,
+        outdir: Union[str, os.PathLike],
+        start_date,
+        rnday,
+        ocean_bnd_ids=[0],
+        elev2D=True,
+        TS=True,
+        UV=True,
+        restart=False,
+        adjust2D=False,
+        lats=None,
+        msl_shifts=None,
+        forecast_mode: bool = False,
+        archive_data: bool = False,
+        timeout_seconds: int = 15,
+        forecast_length_hours: Optional[int] = None,
+        forecast_freq_hours: Optional[int] = None,
+    ):
         '''
         Fetch data from HYCOM and save to netcdf files.
         Args:
@@ -494,13 +500,12 @@ class OpenBoundaryInventory:
             self.start_date = self.start_date.replace(hour=12)
             self.timevector = np.arange(
                 self.start_date, self.start_date + timedelta(days=self.rnday),
-                timedelta(hours=1)).astype(datetime)
+                timedelta(hours=12)).astype(datetime)
         else:
             self.timevector = np.arange(
                 self.start_date,
                 self.start_date + timedelta(days=self.rnday + 1),
                 timedelta(days=1)).astype(datetime)
-
         #Get open boundary
         gdf = self.hgrid.boundaries.open.copy()
         opbd = []
@@ -727,7 +732,9 @@ class OpenBoundaryInventory:
                     xrds=archive_data,
                     archive_data=archive_data,
                     date=timevector[0] if forecast_mode else ds_date,
-                    bbox=bbox)
+                    bbox=bbox,
+                    forecast_length_hours=forecast_length_hours,
+                    forecast_freq_hours=forecast_freq_hours)
                 logger.debug(
                     f"fetching url {url} \nwith a BoundaryDataset instance with id {id(ds)}"
                 )
@@ -803,16 +810,16 @@ class OpenBoundaryInventory:
                             dst_uv['time'][it] = it * 24 * 3600.
                             #uvel
                             uvel_int = interp_to_points_3d(
-                                dep, y2, x2, bxyz, uvel.values
-                                if forecast_mode or archive_data else uvel)
+                                dep, y2, x2, bxyz,
+                                uvel.values if archive_data else uvel)
                             uvel_int = uvel_int.reshape(zcor2.shape)
                             dst_uv['time_series'][it, ind1:ind2, :,
                                                   0] = uvel_int
 
                             #vvel
                             vvel_int = interp_to_points_3d(
-                                dep, y2, x2, bxyz, vvel.values
-                                if forecast_mode or archive_data else vvel)
+                                dep, y2, x2, bxyz,
+                                vvel.values if archive_data else vvel)
                             vvel_int = vvel_int.reshape(zcor2.shape)
                             dst_uv['time_series'][it, ind1:ind2, :,
                                                   1] = vvel_int
