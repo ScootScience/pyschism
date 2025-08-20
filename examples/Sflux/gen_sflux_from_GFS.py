@@ -45,6 +45,10 @@ if __name__ == '__main__':
         help=
         'Use temporary directory for generated files (default: True); if the files already exist, pass their path as --pscr and set --use-tempdir to False to avoid re-downloading the files.'
     )
+    parser.add_argument('--forecast-mode',
+                        type=cli_bool,
+                        default=False,
+                        help='Run in forecast mode (default: False)')
 
     args = parser.parse_args()
 
@@ -57,4 +61,5 @@ if __name__ == '__main__':
               air=True,
               prc=True,
               rad=True,
-              use_tempdir=bool(args.use_tempdir))
+              use_tempdir=bool(args.use_tempdir),
+              forecast_mode=bool(args.use_tempdir))

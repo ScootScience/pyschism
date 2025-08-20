@@ -213,15 +213,17 @@ class GFS:
               air: bool = True,
               prc: bool = True,
               rad: bool = True,
-              use_tempdir: bool = True):
+              use_tempdir: bool = True,
+              forecast_mode: bool = False):
         start_date = nearest_cycle() if start_date is None else start_date
 
         if (start_date + timedelta(days=rnday)) > datetime.utcnow():
-            logger.info(
-                f'End date is beyond the current time, set rnday to 1 day and record to 5 days'
-            )
-            rnday = 1
-            self.record = 5  #days
+            if not forecast_mode:
+                logger.info(
+                    f'End date is beyond the current time, set rnday to 1 day and record to 5 days'
+                )
+                rnday = 1
+                self.record = 5  #days
 
         end_date = start_date + timedelta(hours=rnday * self.record + 1)
         logger.info(f'start time is {start_date}, end time is {end_date}')
