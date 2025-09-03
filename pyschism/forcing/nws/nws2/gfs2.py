@@ -29,6 +29,7 @@ class AWSGrib2Inventory:
         pscr: Optional[str] = None,
         product: str = 'atmos',
         use_tempdir: bool = True,
+        time_interval_hours: int = 1,
     ):
         """
         Download GFS data from AWS.
@@ -73,7 +74,7 @@ class AWSGrib2Inventory:
         timevector = np.arange(
             self.start_date,
             self.start_date + timedelta(hours=record * 24 + 1),
-            np.timedelta64(1, 'h')).astype(datetime)
+            np.timedelta64(time_interval_hours, 'h')).astype(datetime)
 
         file_metadata = self.get_file_namelist(timevector)
 
@@ -201,7 +202,12 @@ def init_worker():
 
 class GFS:
 
-    def __init__(self, level=1, bbox=None, pscr=None):
+    def __init__(
+        self,
+        level=1,
+        bbox=None,
+        pscr=None,
+    ):
         self.level = level
         self.bbox = bbox
         self.pscr = pscr
@@ -214,16 +220,17 @@ class GFS:
               prc: bool = True,
               rad: bool = True,
               use_tempdir: bool = True,
-              forecast_mode: bool = False):
+              forecast_mode: bool = False,
+              time_interval_hours: int = 1):
         start_date = nearest_cycle() if start_date is None else start_date
 
-        if (start_date + timedelta(days=rnday)) > datetime.utcnow():
-            if not forecast_mode:
-                logger.info(
-                    f'End date is beyond the current time, set rnday to 1 day and record to 5 days'
-                )
-                rnday = 1
-                self.record = 5  #days
+        if ((start_date + timedelta(days=rnday))
+                > datetime.utcnow()) | forecast_mode:
+            logger.info(
+                f'End date is beyond the current time, set rnday to 1 day and record to 5 days'
+            )
+            self.record = rnday  # number of days to record from a given start date
+            rnday = 1
 
         end_date = start_date + timedelta(hours=rnday * self.record + 1)
         logger.info(f'start time is {start_date}, end time is {end_date}')
@@ -244,11 +251,13 @@ class GFS:
         datevector = pd.to_datetime(datevector)
         npool = len(datevector) if len(
             datevector) < mp.cpu_count() / 2 else mp.cpu_count() / 2
+        # TODO: Here we need multiprocessing to download all the GRIB files becasue that is the bottleneck when we are in forecasting mode.
         logger.info(f'npool is {npool}')
         pool = mp.Pool(int(npool), initializer=init_worker)
-        pool.starmap(self.gen_sflux,
-                     [(istack + 1, date, air, prc, rad, use_tempdir)
-                      for istack, date in enumerate(datevector)])
+        pool.starmap(self.gen_sflux, [
+            (istack + 1, date, air, prc, rad, use_tempdir, time_interval_hours)
+            for istack, date in enumerate(datevector)
+        ])
         pool.close()
         #self.gen_sflux(1, datevector[0], air, prc, rad)
 
@@ -260,11 +269,13 @@ class GFS:
         prc: bool = True,
         rad: bool = True,
         use_tempdir: bool = True,
+        time_interval_hours: int = 1,
     ):
         inventory = AWSGrib2Inventory(date,
                                       self.record,
                                       self.pscr,
-                                      use_tempdir=use_tempdir)
+                                      use_tempdir=use_tempdir,
+                                      time_interval_hours=time_interval_hours)
         grbfiles = inventory.files
         #cycle = date.hour
 

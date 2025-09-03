@@ -49,7 +49,10 @@ if __name__ == '__main__':
                         type=cli_bool,
                         default=False,
                         help='Run in forecast mode (default: False)')
-
+    parser.add_argument('--time-interval-hours',
+                        type=int,
+                        default=1,
+                        help='Time interval in hours (default: 1)')
     args = parser.parse_args()
 
     hgrid = Hgrid.open(args.hgrid, crs='epsg:4326')
@@ -62,4 +65,5 @@ if __name__ == '__main__':
               prc=True,
               rad=True,
               use_tempdir=bool(args.use_tempdir),
-              forecast_mode=bool(args.use_tempdir))
+              forecast_mode=bool(args.forecast_mode),
+              time_interval_hours=args.time_interval_hours)
