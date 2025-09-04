@@ -576,7 +576,6 @@ class GFS:
         xmin, xmax, ymin, ymax = self.bbox.xmin, self.bbox.xmax, self.bbox.ymin, self.bbox.ymax
         xmin = xmin + 360 if xmin < 0 else xmin
         xmax = xmax + 360 if xmax < 0 else xmax
-        breakpoint()
         ds = xr.open_dataset(grbfile,
                              engine='cfgrib',
                              backend_kwargs=dict(filter_by_keys={
