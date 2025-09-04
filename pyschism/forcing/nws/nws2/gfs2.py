@@ -30,16 +30,19 @@ class AWSGrib2Inventory:
         product: str = 'atmos',
         use_tempdir: bool = True,
         time_interval_hours: int = 1,
+        forecast_mode: bool = False,
     ):
         """
         Download GFS data from AWS.
         This dataset GFS V16.3.0 starts on Feb 26, 2021.
         """
         self.start_date = nearest_cycle() if start_date is None else start_date
+        if forecast_mode:
+            self.start_date = self.start_date.replace(hour=3)
         self.pscr = pscr
         self.product = product
         self.use_tempdir = use_tempdir
-
+        self.forecast_mode = forecast_mode
         # check start_date
         min_date = None
         response = self.s3.list_objects_v2(Bucket=self.bucket,
@@ -75,19 +78,21 @@ class AWSGrib2Inventory:
             self.start_date,
             self.start_date + timedelta(hours=record * 24 + 1),
             np.timedelta64(time_interval_hours, 'h')).astype(datetime)
-
-        file_metadata = self.get_file_namelist(timevector)
-
+        logger.info(f"{start_date} timevector is {timevector}")
+        file_metadata = self.get_file_namelist(timevector, self.forecast_mode)
         for dt in timevector:
-
-            outfile_name = f"gfs.{self.start_date.strftime('%Y%m%d')}/gfs.pgrb2.0p25.{dt.strftime('%Y%m%d%H')}.grib2"
+            if self.forecast_mode:
+                outfile_name = f"gfs.{self.start_date.strftime('%Y%m%d')}/gfs.pgrb2.0p25.{self.start_date.strftime('%Y%m%d%H')}.grib2"
+            else:
+                outfile_name = f"gfs.{self.start_date.strftime('%Y%m%d')}/gfs.pgrb2.0p25.{dt.strftime('%Y%m%d%H')}.grib2"
             filename = pathlib.Path(self.tmpdir) / outfile_name
             filename.parent.mkdir(parents=True, exist_ok=True)
             if filename.exists():
                 logger.info(f"file {filename} already exists, skipping")
                 continue
             with open(filename, 'wb') as f:
-                while (file_metadata[dt]):
+                logger.debug(f"writing file {filename}")
+                while (file_metadata.get(dt, None)):
                     try:
                         key = file_metadata[dt].pop(0)
                         logger.info(f"Downloading file {key} for {dt}")
@@ -104,34 +109,63 @@ class AWSGrib2Inventory:
                                 f'file {key} is not available, try next file')
                             continue
 
-    def get_file_namelist(self, requested_dates):
+    def get_file_namelist(self, requested_dates, forecast_mode: bool = False):
+        '''For a list of dates, prepare a list of GRIB files to download from AWS.
 
+        In hindcast mode (forecast_mode = False), fetch the latest available data for each requested date.
+          Iterates over initialization dates as well as cycles (00Z, 06Z, 12Z, 18Z) to extract only first portion of each model run.
+            So each requested date will be extracted from the model run closest to the requested date.
+       
+        In forecast mode (forecast_mode = True), fetch the requested dates from the model run closest to the start date.
+          Presume we are looking at only the most recent model run and must exctract all data from that one run.
+          In this mode, the fxxx suffix of the GRIB filename is incremented.
+          This suits operational forecast scenarios.      
+
+        '''
         file_metadata = {}
+        # hours ago from current time. used to figure out the number of forecast cycles.
         hours = (datetime.utcnow() - self.start_date).days * 24 + (
             datetime.utcnow() - self.start_date).seconds // 3600
         n_cycles = hours // 6 if hours < 25 else 4
-        cycle_index = (int(self.start_date.hour) - 1) // 6
-        dt = requested_dates[0]
-        for it, dt in enumerate(requested_dates[:n_cycles * 6 + 1]):
-            levels = 3
+        # requested_dates are the model forcing dates that we need to extract data for.
+        for it, dt in enumerate(
+                requested_dates[:n_cycles * 6 +
+                                1]) if not forecast_mode else enumerate(
+                                    requested_dates):
             i = 0
-            fhour = int(dt.hour)
+            if forecast_mode:
+                levels = 1  # levels are the number of fxx time steps per requested date
+                fhour = int(self.start_date.hour)
+                # roll back to the previous day if the start date is at 00Z.
+                date2 = (self.start_date - timedelta(days=1)).strftime(
+                    '%Y%m%d'
+                ) if self.start_date.hour == 0 else self.start_date.strftime(
+                    '%Y%m%d')
+            else:
+                levels = 3
+                fhour = int(dt.hour)
+                date2 = (dt - timedelta(days=1)).strftime(
+                    '%Y%m%d') if dt.hour == 0 else dt.strftime('%Y%m%d')
+            # cycles are the forecast initilization hour: 00Z, 06Z, 12Z, 18Z.
             cycle_index = (fhour - 1) // 6
-            date2 = (dt - timedelta(days=1)).strftime(
-                '%Y%m%d') if dt.hour == 0 else dt.strftime('%Y%m%d')
-
             while (levels):
-
-                cycle = self.fcst_cycles[cycle_index - i]
-                fhour2 = fhour + i * 6 if cycle_index == 0 else fhour - cycle_index * 6 + i * 6
-
-                file_metadata.setdefault(dt, []).append(
-                    f"gfs.{date2}/{cycle}/{self.product}/gfs.t{cycle}z.pgrb2.0p25.f{fhour2:03d}"
-                )
+                if forecast_mode:
+                    # fhour2 must skip 000 because those steps do not contain all of the necessary data_vars.
+                    cycle = self.fcst_cycles[cycle_index]
+                    fhour2 = int(
+                        (dt - self.start_date).total_seconds() // 3600) + 6
+                    file_name = f"gfs.{date2}/{cycle}/{self.product}/gfs.t{cycle}z.pgrb2.0p25.f{fhour2:03d}"
+                else:
+                    cycle = self.fcst_cycles[cycle_index - i]
+                    fhour2 = fhour + i * 6 if cycle_index == 0 else fhour - cycle_index * 6 + i * 6
+                    file_name = f"gfs.{date2}/{cycle}/{self.product}/gfs.t{cycle}z.pgrb2.0p25.f{fhour2:03d}"
+                logger.debug(f"cycle is {cycle}")
+                file_metadata.setdefault(dt, []).append(file_name)
                 levels -= 1
                 i += 1
 
-        if it < 25:
+        if it < 25 and not forecast_mode:
+            logger.info("fewer than 25 requested_dates were given.")
             date2 = (dt - timedelta(days=1)).strftime(
                 '%Y%m%d') if dt.hour == 0 else dt.strftime('%Y%m%d')
             for it, dt in enumerate(requested_dates[n_cycles * 6 + 1:]):
@@ -139,7 +173,6 @@ class AWSGrib2Inventory:
                 i = 0
                 hours = (dt - self.forecast_cycle).days * 24 + (
                     dt - self.forecast_cycle).seconds // 3600
-
                 while (levels):
                     #starting from the last cycle
                     cycle = self.fcst_cycles[cycle_index - i]
@@ -149,7 +182,6 @@ class AWSGrib2Inventory:
                     )
                     levels -= 1
                     i += 1
-
         return file_metadata
 
     @property
@@ -252,14 +284,17 @@ class GFS:
         npool = len(datevector) if len(
             datevector) < mp.cpu_count() / 2 else mp.cpu_count() / 2
         # TODO: Here we need multiprocessing to download all the GRIB files becasue that is the bottleneck when we are in forecasting mode.
-        logger.info(f'npool is {npool}')
-        pool = mp.Pool(int(npool), initializer=init_worker)
-        pool.starmap(self.gen_sflux, [
-            (istack + 1, date, air, prc, rad, use_tempdir, time_interval_hours)
-            for istack, date in enumerate(datevector)
-        ])
-        pool.close()
-        #self.gen_sflux(1, datevector[0], air, prc, rad)
+        if len(datevector) > 1:
+            logger.info(f'npool is {npool}')
+            pool = mp.Pool(int(npool), initializer=init_worker)
+            pool.starmap(self.gen_sflux,
+                         [(istack + 1, date, air, prc, rad, use_tempdir,
+                           time_interval_hours, forecast_mode)
+                          for istack, date in enumerate(datevector)])
+            pool.close()
+        else:
+            self.gen_sflux(1, datevector[0], air, prc, rad, use_tempdir,
+                           time_interval_hours, forecast_mode)
 
     def gen_sflux(
         self,
@@ -270,12 +305,14 @@ class GFS:
         rad: bool = True,
         use_tempdir: bool = True,
         time_interval_hours: int = 1,
+        forecast_mode: bool = False,
     ):
         inventory = AWSGrib2Inventory(date,
                                       self.record,
                                       self.pscr,
                                       use_tempdir=use_tempdir,
-                                      time_interval_hours=time_interval_hours)
+                                      time_interval_hours=time_interval_hours,
+                                      forecast_mode=forecast_mode)
         grbfiles = inventory.files
         #cycle = date.hour
 
@@ -314,7 +351,6 @@ class GFS:
         times = []
         for ifile, file in enumerate(grbfiles):
             logger.info(f'file {ifile} is {file}')
-
             for key, value in Vars.items():
                 if key == 'group1':
                     for key2, value2 in value.items():
@@ -540,7 +576,6 @@ class GFS:
         xmin, xmax, ymin, ymax = self.bbox.xmin, self.bbox.xmax, self.bbox.ymin, self.bbox.ymax
         xmin = xmin + 360 if xmin < 0 else xmin
         xmax = xmax + 360 if xmax < 0 else xmax
-
         ds = xr.open_dataset(grbfile,
                              engine='cfgrib',
                              backend_kwargs=dict(filter_by_keys={
