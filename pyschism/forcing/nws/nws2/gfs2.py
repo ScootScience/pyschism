@@ -82,7 +82,7 @@ class AWSGrib2Inventory:
         file_metadata = self.get_file_namelist(timevector, self.forecast_mode)
         for dt in timevector:
             if self.forecast_mode:
-                outfile_name = f"gfs.{self.start_date.strftime('%Y%m%d')}/gfs.pgrb2.0p25.{self.start_date.strftime('%Y%m%d%H')}.grib2"
+                outfile_name = f"gfs.{self.start_date.strftime('%Y%m%d')}/gfs.pgrb2.0p25.{self.start_date.strftime('%Y%m%d%H')}.{file_metadata[dt][0].split('.')[-1]}.grib2"
             else:
                 outfile_name = f"gfs.{self.start_date.strftime('%Y%m%d')}/gfs.pgrb2.0p25.{dt.strftime('%Y%m%d%H')}.grib2"
             filename = pathlib.Path(self.tmpdir) / outfile_name
