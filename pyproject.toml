@@ -82,6 +82,7 @@ version = {attr = "pyschism._version.__version__"}
 
 [tool.setuptools.package-data]
 "pyschism.forcing.nws.nws2" = ["sflux_inputs.txt"]
+"pyschism.param" = ["param.nml"]
 
 [tool.nosetests]
 exe = true
