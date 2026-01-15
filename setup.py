@@ -115,7 +115,6 @@ setuptools.setup(
         'metpy',
         'netCDF4',
         'netcdf-flattener>=1.2.0',  # last release 2020
-        'numba',
         'ordered-set',  # last release 2022
         'psutil',
         'pygeos',
