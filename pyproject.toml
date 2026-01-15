@@ -80,6 +80,9 @@ include-package-data = true
 [tool.setuptools.dynamic]
 version = {attr = "pyschism._version.__version__"}
 
+[tool.setuptools.package-data]
+"pyschism.forcing.nws.nws2" = ["sflux_inputs.txt"]
+
 [tool.nosetests]
 exe = true
 tests = "tests/"
