@@ -1,0 +1,91 @@
+[build-system]
+requires = [
+  "setuptools>=41.2",
+  "wheel",
+  "dunamai",
+  "netcdf-flattener>=1.2.0",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyschism"
+dynamic = ["version"]
+description = "Python package for working with SCHISM input and output files."
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "Apache 2.0"}
+authors = [
+  {name = "SCHISM development group", email = "jreniel@gmail.com"},
+  {name = "SCHISM development group", email = "lcui@vims.edu"},
+]
+urls = {Homepage = "https://github.com/schism-dev/pyschism.git"}
+keywords = []
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+]
+dependencies = [
+  "boto3",
+  "cdsapi>=0.7.0",
+  "cf-python",
+  "cfgrib",
+  "f90nml",
+  "fsspec",
+  "s3fs",
+  "botocore",
+  "aiobotocore",
+  "geopandas>=0.10",
+  "metpy",
+  "netCDF4",
+  "netcdf-flattener>=1.2.0",
+  "ordered-set",
+  "psutil",
+  "shapely>=2.0",
+  "pyugrid",
+  "rtree",
+  "scipy",
+  "seawater",
+  "sqlalchemy",
+  "stormevents",
+  "tqdm",
+  "tqdm-logging-wrapper",
+  "utm",
+  "wget",
+  "xarray",
+  "xmltodict",
+  "zarr",
+  "appdirs",
+]
+
+[project.optional-dependencies]
+dev = [
+  "coverage",
+  "flake8",
+  "nose",
+]
+
+[project.scripts]
+pyschism = "pyschism.__main__:main"
+
+[tool.setuptools]
+packages = {find = {exclude = ["tests", "examples", "docs", "docker"]}}
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "pyschism._version.__version__"}
+
+[tool.nosetests]
+exe = true
+tests = "tests/"
+
+[tool.flake8]
+max-line-length = 130
+
+[tool.mypy]
+plugins = ["sqlmypy"]
